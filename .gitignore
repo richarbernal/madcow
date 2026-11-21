@@ -1,3 +1,6 @@
 __pycache__/
 *.pyc
 .DS_Store
+# favoritos personales (los guarda el servidor)
+watchlist.json
+watchlist.json.*

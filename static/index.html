@@ -63,7 +63,10 @@
   <main class="layout">
     <section class="charts">
       <div class="quote" id="quote">
-        <div class="q-title"><span id="qSymbol">—</span><span id="qName" class="muted"></span></div>
+        <div class="q-title">
+          <button type="button" id="starBtn" class="star" title="Añadir a favoritos" aria-pressed="false">☆</button>
+          <span id="qSymbol">—</span><span id="qName" class="muted"></span>
+        </div>
         <div class="q-price"><span id="qLast">—</span> <span id="qChange"></span></div>
       </div>
 
@@ -96,6 +99,34 @@
     </section>
 
     <aside class="sidebar">
+      <div class="tabs" role="tablist">
+        <button type="button" role="tab" data-tab="watch">★ Favoritos</button>
+        <button type="button" role="tab" data-tab="ind">Indicadores</button>
+      </div>
+
+      <div class="tab-body" data-tab="watch" role="tabpanel">
+        <section class="panel watch-panel">
+          <form id="watchForm" class="watch-form" autocomplete="off">
+            <div class="search">
+              <input id="watchInput" type="text" placeholder="Añadir símbolo…" spellcheck="false" aria-label="Añadir símbolo a favoritos">
+              <ul class="suggestions" id="watchSuggest" hidden></ul>
+            </div>
+            <button type="submit" class="icon-btn" title="Añadir">+</button>
+          </form>
+          <div class="watch-head" aria-hidden="true"><span>Símbolo</span><span></span><span>Último</span><span>Var.</span><span>RSI</span></div>
+          <ul id="watchList" class="watch-list"></ul>
+          <p id="watchEmpty" class="muted small watch-empty" hidden>
+            Aún no tienes favoritos. Escribe un símbolo arriba o pulsa ☆ junto al nombre de la acción.
+          </p>
+          <div class="watch-foot muted small">
+            <span id="watchUpdated"></span>
+            <button type="button" id="watchRefresh" class="link-btn">↻ Actualizar</button>
+          </div>
+        </section>
+        <p class="muted small hint">Clic: abrir · <b>vs</b>: comparar · arrastra para ordenar · ↑/↓ para moverte por la lista</p>
+      </div>
+
+      <div class="tab-body" data-tab="ind" role="tabpanel" hidden>
       <section class="panel">
         <h3>
           <label class="switch"><input type="checkbox" id="bbOn"><span></span></label>
@@ -126,6 +157,7 @@
         <h3>Volumen</h3>
         <div class="row"><label>Mostrar volumen</label><label class="switch"><input type="checkbox" id="volOn"><span></span></label></div>
       </section>
+      </div>
 
       <section class="panel" id="signals">
         <h3>Lectura actual</h3>

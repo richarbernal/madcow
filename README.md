@@ -19,6 +19,16 @@ no puede llamarlo directamente por CORS). Si no hay conexión, la app muestra
 
 ## Funciones
 
+- **Favoritos (watchlist)** en la barra lateral: último precio, variación diaria, RSI y
+  minigráfico de 30 sesiones, con refresco automático cada minuto.
+  - Añade símbolos desde el campo de la lista o con la ☆ junto al nombre de la acción.
+  - Clic para abrir, **vs** para compararla con la actual, ✕ para quitarla,
+    arrastra para reordenar y usa ↑/↓ para recorrer la lista.
+  - Se guarda en el archivo `watchlist.json` (junto a `server.py`), así que se conserva
+    entre sesiones, navegadores y aunque borres los datos del navegador. Puedes
+    cambiar la ubicación con `python3 server.py --watchlist ~/favoritos.json`
+    (por ejemplo, a una carpeta sincronizada en la nube). No se sube a git.
+
 - **Gráfico de precio**: velas o línea, volumen, rangos 1M → Máx, intervalos 1h / diario / semanal / mensual.
 - **Bandas de Bollinger**: periodo, nº de desviaciones y color configurables.
 - **Medias móviles**: tantas como quieras, SMA o EMA, periodo en sesiones (por defecto 20, 50 y 200).
@@ -36,7 +46,8 @@ Símbolos de Yahoo: `AAPL`, `MSFT`, `SAN.MC` (Mercado Continuo), `ITX.MC`, `^IBE
 ## Estructura
 
 ```
-server.py              servidor HTTP + proxy de Yahoo Finance (stdlib)
+server.py              servidor HTTP, proxy de Yahoo Finance y watchlist (stdlib)
+watchlist.json         tus favoritos (se crea al añadir el primero; ignorado por git)
 static/index.html      interfaz
 static/app.js          lógica de gráficos, comparación y controles
 static/indicators.js   SMA, EMA, Bollinger, RSI y estadísticas

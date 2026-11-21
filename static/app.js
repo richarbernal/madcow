@@ -17,6 +17,7 @@ const DEFAULTS = {
   demo: false,
   theme: "dark",
   cmpMode: "perf",
+  sideTab: "watch",
   vol: true,
   bb: { on: true, period: 20, mult: 2, color: "#7e57c2" },
   rsi: { on: true, period: 14, high: 70, low: 30 },
@@ -498,6 +499,206 @@ function renderStats(A, B) {
 }
 
 // ---------------------------------------------------------------------------
+// Watchlist (favoritos): se guarda en el servidor, en watchlist.json
+// ---------------------------------------------------------------------------
+const SYMBOL_RE = /^[A-Z0-9.\-^=]{1,20}$/;
+const WL = { symbols: [], quotes: new Map(), loaded: false, updated: null };
+let dragSym = null;
+
+async function wlFetch() {
+  try {
+    const res = await fetch("/api/watchlist");
+    if (!res.ok) throw new Error(res.status);
+    WL.symbols = (await res.json()).symbols || [];
+  } catch {
+    banner("No se pudo leer la watchlist del servidor.", "error");
+  }
+  WL.loaded = true;
+  renderWatchlist();
+  refreshQuotes();
+}
+
+// Cambia la lista y la guarda; si el servidor falla, se deshace el cambio.
+async function wlSet(next) {
+  const prev = WL.symbols;
+  WL.symbols = next;
+  renderWatchlist();
+  try {
+    const res = await fetch("/api/watchlist", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ symbols: next }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.error || `error ${res.status}`);
+    WL.symbols = body.symbols;
+  } catch (e) {
+    WL.symbols = prev;
+    banner(`No se pudo guardar la watchlist: ${e.message}`, "error");
+  }
+  renderWatchlist();
+}
+
+function wlAdd(sym) {
+  sym = sym.trim().toUpperCase();
+  if (!sym) return;
+  if (!SYMBOL_RE.test(sym)) { banner(`Símbolo no válido: ${sym}`, "error"); return; }
+  if (WL.symbols.includes(sym)) { highlightRow(sym); return; }
+  wlSet([...WL.symbols, sym]).then(() => refreshQuotes([sym]));
+}
+const wlRemove = (sym) => wlSet(WL.symbols.filter((s) => s !== sym));
+const wlToggle = (sym) => (WL.symbols.includes(sym) ? wlRemove(sym) : wlAdd(sym));
+
+function highlightRow(sym) {
+  const li = [...$("watchList").children].find((x) => x.dataset.sym === sym);
+  if (!li) return;
+  li.scrollIntoView({ block: "nearest" });
+  li.animate([{ background: "rgba(245, 179, 1, .35)" }, { background: "transparent" }], 900);
+}
+
+let quotesToken = 0;
+async function refreshQuotes(only = null) {
+  const syms = only || WL.symbols;
+  if (!syms.length) return;
+  const token = only ? quotesToken : ++quotesToken;
+  try {
+    const q = new URLSearchParams({ symbols: syms.join(",") });
+    if (S.demo) q.set("demo", "1");
+    const res = await fetch("/api/quotes?" + q);
+    const body = await res.json();
+    if (token !== quotesToken) return; // llegó una petición más reciente
+    for (const x of body.quotes || []) WL.quotes.set(x.symbol, x);
+    if (!only) WL.updated = new Date();
+  } catch { /* se reintenta en el siguiente ciclo */ }
+  renderWatchlist();
+}
+
+const fmtPrice = (v) => fmt(v, v >= 10000 ? 0 : v < 1 ? 4 : 2);
+
+function sparkline(vals) {
+  const w = 40, h = 20;
+  const min = Math.min(...vals), max = Math.max(...vals), span = max - min || 1;
+  const pts = vals.map((v, i) =>
+    `${((i / Math.max(1, vals.length - 1)) * w).toFixed(1)},${(h - 2 - ((v - min) / span) * (h - 4)).toFixed(1)}`).join(" ");
+  const color = vals.at(-1) >= vals[0] ? cssVar("--up") : cssVar("--down");
+  return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" aria-hidden="true">` +
+    `<polyline points="${pts}" fill="none" stroke="${color}" stroke-width="1.5" stroke-linejoin="round"/></svg>`;
+}
+
+function renderWatchlist() {
+  const star = $("starBtn");
+  const fav = WL.symbols.includes(S.symbol);
+  star.textContent = fav ? "★" : "☆";
+  star.classList.toggle("on", fav);
+  star.setAttribute("aria-pressed", String(fav));
+  star.title = fav ? "Quitar de favoritos" : "Añadir a favoritos";
+  $("watchEmpty").hidden = !WL.loaded || WL.symbols.length > 0;
+  $("watchUpdated").textContent = WL.updated
+    ? "Actualizado " + WL.updated.toLocaleTimeString("es-ES", { hour: "2-digit", minute: "2-digit" }) : "";
+  if (dragSym) return; // no rehacer la lista a mitad de un arrastre
+
+  $("watchList").innerHTML = WL.symbols.map((sym) => {
+    const q = WL.quotes.get(sym);
+    const ok = q && !q.error && q.closes?.length;
+    let cells;
+    if (!q) cells = `<span class="err">cargando…</span>`;
+    else if (!ok) cells = `<span class="err">${esc(q.error || "Sin datos")}</span>`;
+    else {
+      const c = q.closes, last = c.at(-1), prev = c.at(-2) ?? last, chg = last / prev - 1;
+      const r = rsi(c, S.rsi.period).at(-1);
+      const rc = r == null ? "" : r >= S.rsi.high ? "down" : r <= S.rsi.low ? "up" : "";
+      cells = sparkline(c.slice(-30)) +
+        `<span class="num">${fmtPrice(last)}</span>` +
+        `<span class="num ${chg >= 0 ? "up" : "down"}">${pct(chg)}</span>` +
+        `<span class="num ${rc}" title="RSI(${S.rsi.period})">${fmt(r, 0)}</span>`;
+    }
+    const name = ok ? q.name.replace(" (simulado)", "") : "";
+    const cls = ["watch-row", sym === S.symbol && "active", sym === S.compare && "cmp"].filter(Boolean).join(" ");
+    return `<li class="${cls}" draggable="true" data-sym="${esc(sym)}" title="${esc(name || sym)}">
+      <span class="sym"><b>${esc(sym)}</b><small>${q?.demo ? `<span class="sim" title="Datos simulados">SIM</span>` : ""}${esc(name)}</small></span>
+      ${cells}
+      <span class="actions">
+        <button type="button" data-act="cmp" title="Comparar ${esc(S.symbol)} con ${esc(sym)}">vs</button>
+        <button type="button" data-act="rm" class="rm" title="Quitar de favoritos">✕</button>
+      </span></li>`;
+  }).join("");
+}
+
+{
+  const list = $("watchList");
+  list.addEventListener("click", (e) => {
+    const li = e.target.closest("li[data-sym]");
+    if (!li) return;
+    const sym = li.dataset.sym;
+    const act = e.target.closest("button")?.dataset.act;
+    if (act === "rm") return wlRemove(sym);
+    if (act === "cmp") {
+      if (sym === S.symbol) return;
+      S.compare = sym;
+      load().then(() => $("compareBlock").scrollIntoView({ behavior: "smooth", block: "start" }));
+      return;
+    }
+    if (sym !== S.symbol) { S.symbol = sym; load(); }
+  });
+
+  // Reordenar arrastrando
+  const clearMarks = () => list.querySelectorAll(".drop-before, .drop-after")
+    .forEach((x) => x.classList.remove("drop-before", "drop-after"));
+  const endDrag = () => { dragSym = null; clearMarks(); renderWatchlist(); };
+  list.addEventListener("dragstart", (e) => {
+    const li = e.target.closest("li[data-sym]");
+    if (!li) return;
+    dragSym = li.dataset.sym;
+    li.classList.add("dragging");
+    e.dataTransfer.effectAllowed = "move";
+    e.dataTransfer.setData("text/plain", dragSym);
+  });
+  list.addEventListener("dragover", (e) => {
+    if (!dragSym) return;
+    e.preventDefault();
+    clearMarks();
+    const li = e.target.closest("li[data-sym]");
+    if (!li || li.dataset.sym === dragSym) return;
+    const r = li.getBoundingClientRect();
+    li.classList.add(e.clientY < r.top + r.height / 2 ? "drop-before" : "drop-after");
+  });
+  list.addEventListener("drop", (e) => {
+    e.preventDefault();
+    const li = e.target.closest("li[data-sym]");
+    const moving = dragSym;
+    if (moving && li && li.dataset.sym !== moving) {
+      const after = li.classList.contains("drop-after");
+      const next = WL.symbols.filter((s) => s !== moving);
+      next.splice(next.indexOf(li.dataset.sym) + (after ? 1 : 0), 0, moving);
+      dragSym = null;
+      clearMarks();
+      wlSet(next);
+    } else endDrag();
+  });
+  list.addEventListener("dragend", () => { if (dragSym) endDrag(); });
+
+  $("starBtn").addEventListener("click", () => wlToggle(S.symbol));
+  $("watchRefresh").addEventListener("click", () => refreshQuotes());
+
+  // ↑ / ↓ recorren la watchlist (salvo si estás escribiendo en un campo)
+  document.addEventListener("keydown", (e) => {
+    if ((e.key !== "ArrowUp" && e.key !== "ArrowDown") || e.altKey || e.ctrlKey || e.metaKey) return;
+    if (e.target.closest?.("input, select, textarea") || !WL.symbols.length) return;
+    e.preventDefault();
+    const n = WL.symbols.length, i = WL.symbols.indexOf(S.symbol);
+    const j = e.key === "ArrowDown" ? (i < 0 ? 0 : Math.min(n - 1, i + 1)) : (i < 0 ? n - 1 : Math.max(0, i - 1));
+    if (WL.symbols[j] !== S.symbol) { S.symbol = WL.symbols[j]; load(); }
+    list.children[j]?.scrollIntoView({ block: "nearest" });
+  });
+
+  // Refresco automático cada minuto mientras la pestaña esté visible
+  setInterval(() => { if (document.visibilityState === "visible") refreshQuotes(); }, 60_000);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible" && (!WL.updated || Date.now() - WL.updated > 60_000)) refreshQuotes();
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Carga y render global
 // ---------------------------------------------------------------------------
 function banner(msg, kind = "warn") {
@@ -515,6 +716,7 @@ function recompute(keepRange = true) {
   renderQuote();
   renderSignals();
   renderCompare();
+  renderWatchlist();
 }
 
 let loadToken = 0;
@@ -522,6 +724,7 @@ async function load() {
   const token = ++loadToken;
   save();
   syncControls();
+  renderWatchlist();
   document.body.classList.add("loading");
   const applyTheme = chartTheme();
   for (const c of [priceChart, rsiChart, cmpChart]) c.applyOptions(applyTheme);
@@ -625,13 +828,28 @@ $("cmpModeSeg").addEventListener("click", (e) => {
   const m = e.target.dataset.mode;
   if (m) { S.cmpMode = m; save(); renderCompare(); }
 });
-$("demoToggle").addEventListener("change", (e) => { S.demo = e.target.checked; load(); });
+$("demoToggle").addEventListener("change", (e) => {
+  S.demo = e.target.checked;
+  WL.quotes.clear(); // no mezclar datos reales y simulados
+  refreshQuotes();
+  load();
+});
 $("clearCompare").addEventListener("click", () => { S.compare = ""; dataB = null; load(); });
 $("themeBtn").addEventListener("click", () => {
   S.theme = S.theme === "dark" ? "light" : "dark";
   applyTheme();
   save();
   recompute();
+});
+
+function setTab(t) {
+  S.sideTab = t;
+  document.querySelectorAll(".tabs button").forEach((b) => b.classList.toggle("active", b.dataset.tab === t));
+  document.querySelectorAll(".tab-body").forEach((d) => (d.hidden = d.dataset.tab !== t));
+}
+document.querySelector(".tabs").addEventListener("click", (e) => {
+  const t = e.target.closest("button")?.dataset.tab;
+  if (t) { setTab(t); save(); }
 });
 
 function applyTheme() {
@@ -691,6 +909,10 @@ setupSearch("symbolInput", "symbolSuggest", "symbolForm", (v) => {
   v = v.trim().toUpperCase();
   if (v && v !== S.symbol) { S.symbol = v; load(); }
 });
+setupSearch("watchInput", "watchSuggest", "watchForm", (v) => {
+  wlAdd(v);
+  $("watchInput").value = "";
+});
 setupSearch("compareInput", "compareSuggest", "compareForm", (v) => {
   v = v.trim().toUpperCase();
   if (v !== S.compare) { S.compare = v; if (!v) dataB = null; load(); }
@@ -703,4 +925,6 @@ window.addEventListener("hashchange", () => {
 });
 
 applyTheme();
+setTab(S.sideTab);
 load();
+wlFetch();
