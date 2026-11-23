@@ -91,7 +91,7 @@ async function fetchSeries(symbol) {
   let res = await fetch("/api/chart?" + q);
   let body = await res.json().catch(() => ({}));
   if (!res.ok && body.offline && !S.demo) {
-    const reason = body.error || "error desconocido";
+    const reason = `${body.source || "fuente de datos"}: ${body.error || "error desconocido"}`;
     q.set("demo", "1");
     res = await fetch("/api/chart?" + q);
     body = await res.json();
@@ -603,7 +603,12 @@ function renderWatchlist() {
     const ok = q && !q.error && q.closes?.length;
     let cells;
     if (!q) cells = `<span class="err">cargando…</span>`;
-    else if (!ok) cells = `<span class="err">${esc(q.error || "Sin datos")}</span>`;
+    else if (!ok) {
+      const msg = q.error || "Sin datos";
+      const short = /permis/i.test(msg) ? "Sin permisos de datos" : /no reconoce|no encontrado|no válido|no soportado/i.test(msg)
+        ? "Símbolo no encontrado" : "Error al cargar";
+      cells = `<span class="err" title="${esc(msg)}">⚠ ${short}</span>`;
+    }
     else {
       const c = q.closes, last = c.at(-1), prev = c.at(-2) ?? last, chg = last / prev - 1;
       const r = rsi(c, S.rsi.period).at(-1);
@@ -739,10 +744,11 @@ async function load() {
     dataB = b && !b.error ? b : null;
     const msgs = [];
     const offline = a.offlineFallback || b?.offlineFallback;
-    if (offline) msgs.push(`Sin datos de Yahoo Finance (${offline}). Se muestran DATOS SIMULADOS.`);
+    if (offline) msgs.push(`Sin conexión con los datos reales (${offline}). Se muestran DATOS SIMULADOS.`);
     else if (a.demo) msgs.push("Modo demo: datos simulados, no reales.");
     if (b?.error) msgs.push(`No se pudo cargar ${S.compare}: ${b.error}`);
     banner(msgs.join(" "), b?.error ? "error" : "warn");
+    $("dataSource").textContent = a.demo ? "simulados" : a.source || "—";
     recompute(false);
   } catch (e) {
     if (token !== loadToken) return;

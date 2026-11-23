@@ -1,0 +1,296 @@
+"""Fuente de datos Interactive Brokers para MadCow (TWS o IB Gateway).
+
+Usa la API oficial de TWS a través de la librería `ib_async` (pip install ib_async).
+La conexión es de SOLO LECTURA: la app no puede enviar órdenes.
+
+Los símbolos de la app siguen el formato habitual (estilo Yahoo) y aquí se
+traducen al contrato de IBKR:
+
+    AAPL, BRK-B         → acciones de EE. UU. (SMART, USD)
+    SAN.MC              → Bolsa de Madrid (BM)
+    SAP.DE / SAP.F      → Xetra (IBIS) / Fráncfort (FWB)
+    MC.PA, ASML.AS      → Euronext París (SBF) / Ámsterdam (AEB)
+    ENI.MI, BP.L, NESN.SW, VOLV-B.ST, NOKIA.HE, EQNR.OL
+    ^IBEX, ^GSPC, ^GDAXI, ^STOXX50E, ^NDX, ^VIX, ^FCHI   → índices
+    ^LOQUESEA           → cualquier índice de IBKR por su símbolo (p. ej. ^IBEX35)
+"""
+from __future__ import annotations
+
+import asyncio
+import concurrent.futures
+import datetime as dt
+import logging
+import threading
+import time
+
+# ib_async escribe en inglés cada intento fallido; los errores ya se explican desde aquí.
+logging.getLogger("ib_async").setLevel(logging.CRITICAL)
+
+
+class Unavailable(Exception):
+    """TWS / IB Gateway no está accesible (o falta ib_async)."""
+
+
+class SymbolError(ValueError):
+    """El símbolo no existe en IBKR o no hay permisos de datos para él."""
+
+
+# Sufijo estilo Yahoo → (bolsa principal en IBKR, divisa)
+SUFFIXES = {
+    "MC": ("BM", "EUR"),      # Bolsa de Madrid
+    "DE": ("IBIS", "EUR"),    # Xetra
+    "F": ("FWB", "EUR"),      # Fráncfort
+    "PA": ("SBF", "EUR"),     # Euronext París
+    "AS": ("AEB", "EUR"),     # Euronext Ámsterdam
+    "MI": ("BVME", "EUR"),    # Borsa Italiana
+    "L": ("LSE", "GBP"),      # Londres
+    "SW": ("EBS", "CHF"),     # SIX Suiza
+    "ST": ("SFB", "SEK"),     # Estocolmo
+    "HE": ("HEX", "EUR"),     # Helsinki
+    "OL": ("OSE", "NOK"),     # Oslo
+}
+EXCHANGE_TO_SUFFIX = {exch: suf for suf, (exch, _) in SUFFIXES.items()}
+US_EXCHANGES = {"NYSE", "NASDAQ", "ARCA", "AMEX", "BATS", "IEX", "ISLAND", "PINK", "NYSENAT"}
+
+# Índices con nombre Yahoo → (símbolo IBKR, bolsa)
+INDICES = {
+    "^GSPC": ("SPX", "CBOE"),
+    "^SPX": ("SPX", "CBOE"),
+    "^NDX": ("NDX", "NASDAQ"),
+    "^VIX": ("VIX", "CBOE"),
+    "^IBEX": ("IBEX35", "MEFFRV"),
+    "^GDAXI": ("DAX", "EUREX"),
+    "^STOXX50E": ("ESTX50", "EUREX"),
+    "^FCHI": ("CAC40", None),
+    "^DJI": ("INDU", None),
+    "^RUT": ("RUT", None),
+}
+
+DURATIONS = {"1mo": "1 M", "3mo": "3 M", "6mo": "6 M", "1y": "1 Y", "2y": "2 Y",
+             "5y": "5 Y", "10y": "10 Y", "max": "30 Y"}
+BAR_SIZES = {"1h": "1 hour", "1d": "1 day", "1wk": "1 week", "1mo": "1 month"}
+DEFAULT_PORTS = (7496, 4001, 7497, 4002)  # TWS real, Gateway real, TWS simulada, Gateway simulada
+PORT_NAMES = {7496: "TWS (real)", 7497: "TWS (simulada)", 4001: "IB Gateway (real)", 4002: "IB Gateway (simulada)"}
+
+# Códigos de IBKR que son solo avisos informativos
+def _is_info(code: int) -> bool:
+    return 2100 <= code < 2200 or code in (10167, 10197, 300)
+
+
+def candidates(symbol: str):
+    """Contratos de IBKR a probar para un símbolo de la app (en orden)."""
+    from ib_async import Index, Stock
+
+    if symbol.startswith("^"):
+        sym, exch = INDICES.get(symbol, (symbol[1:], None))
+        return [Index(sym, exch or "")]
+    base, _, suffix = symbol.rpartition(".")
+    if base and suffix in SUFFIXES:
+        exch, cur = SUFFIXES[suffix]
+        base = base.replace("-", " ")
+        out = [Stock(base, "SMART", cur, primaryExchange=exch)]
+        if exch == "LSE":  # IBKR escribe algunos valores de Londres con punto final (BP.)
+            out.append(Stock(base + ".", "SMART", cur, primaryExchange=exch))
+        return out
+    if "." in symbol:
+        raise SymbolError(f"Sufijo de bolsa no soportado: {symbol}. "
+                          f"Usa uno de: {', '.join('.' + s for s in SUFFIXES)}")
+    return [Stock(symbol.replace("-", " "), "SMART", "USD")]
+
+
+def app_symbol(contract) -> str | None:
+    """Traduce un contrato de IBKR al formato de símbolo de la app (o None si no se soporta)."""
+    if contract.secType == "IND":
+        return "^" + contract.symbol
+    if contract.secType != "STK":
+        return None
+    exch = contract.primaryExchange or contract.exchange
+    if exch in US_EXCHANGES:
+        return contract.symbol.replace(" ", "-")
+    suffix = EXCHANGE_TO_SUFFIX.get(exch)
+    if not suffix:
+        return None
+    return contract.symbol.rstrip(".").replace(" ", "-") + "." + suffix
+
+
+def _timestamp(d) -> int:
+    if isinstance(d, dt.datetime):
+        if d.tzinfo is None:
+            d = d.replace(tzinfo=dt.timezone.utc)
+        return int(d.timestamp())
+    return int(dt.datetime(d.year, d.month, d.day, tzinfo=dt.timezone.utc).timestamp())
+
+
+def _duration(rng: str, interval: str) -> str:
+    if rng == "ytd":
+        days = (dt.date.today() - dt.date(dt.date.today().year, 1, 1)).days + 1
+        return f"{max(days, 2)} D"
+    if interval == "1h" and rng not in ("1mo", "3mo", "6mo"):
+        return "1 Y"  # IBKR limita el histórico intradía; un año de velas horarias es suficiente
+    return DURATIONS[rng]
+
+
+class IBKRSource:
+    name = "Interactive Brokers"
+
+    def __init__(self, host: str = "127.0.0.1", port: int | None = None, client_id: int = 117):
+        self.host = host
+        self.ports = (port,) if port else DEFAULT_PORTS
+        self.client_id = client_id
+        self.connected_port: int | None = None
+        self._ib = None
+        self._errors: list = []
+        self._details: dict = {}      # símbolo → (contrato, nombre)
+        self._last_search = 0.0
+        self._loop = asyncio.new_event_loop()
+        threading.Thread(target=self._loop.run_forever, name="ibkr", daemon=True).start()
+        self._lock = asyncio.run_coroutine_threadsafe(self._make_lock(), self._loop).result()
+
+    @staticmethod
+    async def _make_lock():
+        return asyncio.Lock()
+
+    # ---- puente entre los hilos del servidor HTTP y el bucle asyncio de ib_async ----
+    def _run(self, coro, timeout: float = 120):
+        fut = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        try:
+            return fut.result(timeout)
+        except concurrent.futures.TimeoutError:
+            fut.cancel()
+            raise Unavailable("IBKR no respondió a tiempo") from None
+
+    def _on_error(self, req_id, code, text, contract):
+        if not _is_info(code):
+            self._errors.append((code, text))
+
+    async def _connect(self):
+        try:
+            import ib_async
+        except ImportError:
+            raise Unavailable("falta la librería ib_async. Instálala con: pip install ib_async") from None
+        if self._ib is not None and self._ib.isConnected():
+            return self._ib
+        if self._ib is None:
+            self._ib = ib_async.IB()
+            self._ib.errorEvent += self._on_error
+        no_fetch = ib_async.ib.StartupFetch(0)  # solo datos: no pedir cartera ni órdenes
+        tried = []
+        for port in self.ports:
+            for cid in (self.client_id, self.client_id + 1, self.client_id + 2):
+                try:
+                    await self._ib.connectAsync(self.host, port, clientId=cid, timeout=5,
+                                                readonly=True, fetchFields=no_fetch)
+                    self.connected_port = port
+                    return self._ib
+                except (ConnectionRefusedError, asyncio.TimeoutError, TimeoutError):
+                    self._ib.disconnect()
+                    break  # nadie escucha (o no responde) en este puerto: probar el siguiente
+                except Exception:  # p. ej. clientId en uso (error 326): probar con otro
+                    self._ib.disconnect()
+            tried.append(str(port))
+        raise Unavailable(
+            f"no se pudo conectar con TWS / IB Gateway en {self.host} (puertos {', '.join(tried)}). "
+            "Ábrelo, inicia sesión y activa la API en Configuración global → API → Ajustes → "
+            "«Habilitar clientes ActiveX y Socket»")
+
+    def _error_text(self) -> str:
+        return "; ".join(f"[{c}] {t}" for c, t in self._errors[-3:])
+
+    async def _resolve(self, ib, symbol: str):
+        if symbol in self._details:
+            return self._details[symbol]
+        for c in candidates(symbol):
+            self._errors.clear()
+            details = await ib.reqContractDetailsAsync(c)
+            if details:
+                d = details[0]
+                if c.secType == "IND" and not c.exchange:  # índice sin bolsa conocida: preferir la de su país
+                    d = sorted(details, key=lambda x: x.contract.exchange in ("CBOE", "EUREX", "MEFFRV", "MONEP", "CME"),
+                               reverse=True)[0]
+                hit = (d.contract, d.longName or symbol)
+                self._details[symbol] = hit
+                return hit
+        raise SymbolError(f"IBKR no reconoce el símbolo {symbol}")
+
+    async def _chart(self, symbol: str, rng: str, interval: str) -> dict:
+        async with self._lock:
+            ib = await self._connect()
+            contract, name = await self._resolve(ib, symbol)
+            self._errors.clear()
+            bars = await ib.reqHistoricalDataAsync(
+                contract, endDateTime="", durationStr=_duration(rng, interval),
+                barSizeSetting=BAR_SIZES[interval], whatToShow="TRADES",
+                useRTH=True, formatDate=2, timeout=45)
+            errors = self._error_text()
+            if not ib.isConnected():
+                raise Unavailable("se perdió la conexión con TWS / IB Gateway")
+        if not bars:
+            if "permission" in errors.lower() or "subscription" in errors.lower():
+                raise SymbolError(f"tu cuenta de IBKR no tiene permisos de datos de mercado para {symbol} ({errors})")
+            raise SymbolError(f"IBKR no devolvió datos para {symbol}" + (f": {errors}" if errors else ""))
+        out = []
+        for b in bars:
+            if b.close is None or b.close <= 0:
+                continue
+            out.append({"time": _timestamp(b.date), "open": b.open, "high": b.high, "low": b.low,
+                        "close": b.close, "volume": max(0, int(b.volume or 0))})
+        return {
+            "symbol": symbol,
+            "name": name,
+            "currency": contract.currency,
+            "exchange": contract.primaryExchange or contract.exchange,
+            "bars": out,
+            "demo": False,
+        }
+
+    async def _search(self, query: str) -> list:
+        async with self._lock:
+            ib = await self._connect()
+            wait = 1.05 - (time.monotonic() - self._last_search)  # IBKR: máx. 1 búsqueda por segundo
+            if wait > 0:
+                await asyncio.sleep(wait)
+            self._last_search = time.monotonic()
+            found = await ib.reqMatchingSymbolsAsync(query) or []
+        results = []
+        for d in found:
+            sym = app_symbol(d.contract)
+            if sym:
+                results.append({"symbol": sym, "name": d.contract.description or "",
+                                "exchange": d.contract.primaryExchange or d.contract.exchange,
+                                "type": d.contract.secType})
+        return results[:10]
+
+    # ---- interfaz pública (llamada desde los hilos del servidor) ----
+    def chart(self, symbol: str, rng: str, interval: str) -> dict:
+        return self._run(self._chart(symbol, rng, interval))
+
+    def search(self, query: str) -> list:
+        return self._run(self._search(query), timeout=30)
+
+    def check(self) -> bool:
+        """Diagnóstico para `python3 server.py --check`."""
+        try:
+            import ib_async
+            print(f"ib_async ...... {ib_async.__version__}")
+        except ImportError:
+            print("ib_async ...... NO INSTALADO → ejecuta: pip install ib_async")
+            return False
+        print(f"Conexión ...... probando {self.host}, puertos {', '.join(map(str, self.ports))} … ", end="", flush=True)
+        try:
+            ib = self._run(self._connect(), timeout=60)
+        except Unavailable as e:
+            print(f"FALLO\n    → {e}")
+            return False
+        print(f"OK, {PORT_NAMES.get(self.connected_port, 'puerto')} {self.connected_port} "
+              f"(versión de servidor {ib.client.serverVersion()})\n")
+        ok = True
+        for sym in ("AAPL", "SAN.MC", "SAP.DE", "^IBEX"):
+            print(f"Probando {sym:<8} … ", end="", flush=True)
+            try:
+                d = self.chart(sym, "1mo", "1d")
+                last = d["bars"][-1]
+                print(f"OK ({len(d['bars'])} sesiones, último cierre {last['close']:.2f} {d['currency']}) · {d['name']}")
+            except (SymbolError, Unavailable) as e:
+                print(f"FALLO\n    → {e}")
+                ok = False
+        return ok

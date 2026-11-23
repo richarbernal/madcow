@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """Servidor de MadCow Charts.
 
-Sirve el frontend estático y hace de proxy a la API de gráficos de Yahoo Finance
-(el navegador no puede llamarla directamente por CORS). Solo usa la librería
-estándar de Python: no hace falta instalar nada.
+Sirve el frontend estático y obtiene las cotizaciones de la fuente de datos:
+
+  * Interactive Brokers (por defecto): a través de TWS o IB Gateway abierto en
+    este ordenador, en modo solo lectura. Necesita: pip install ib_async
+  * Yahoo Finance (--source yahoo): sin dependencias, pero Yahoo bloquea a menudo
+    las peticiones automáticas (error 429).
 
 La watchlist (favoritos) se guarda en watchlist.json junto a este archivo,
 así que se conserva entre sesiones y navegadores.
@@ -12,7 +15,8 @@ Uso:
     python3 server.py            # http://localhost:8000
     python3 server.py --port 9000
     python3 server.py --watchlist ~/mis-favoritos.json
-    python3 server.py --check    # diagnóstico de la conexión con Yahoo Finance
+    python3 server.py --check    # diagnóstico de la conexión con la fuente de datos
+    python3 server.py --ib-port 7497   # forzar puerto de TWS/IB Gateway (por defecto se detecta)
 """
 import argparse
 import json
@@ -33,6 +37,8 @@ import urllib.request
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+import ibkr
+
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 YAHOO_CHART = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
 YAHOO_SEARCH = "https://query1.finance.yahoo.com/v1/finance/search"
@@ -43,6 +49,9 @@ VALID_INTERVALS = {"1h", "1d", "1wk", "1mo"}
 
 _cache: dict = {}
 CACHE_TTL = 60  # segundos
+
+SOURCE = None                  # IBKRSource, o None para usar Yahoo Finance
+SOURCE_NAME = "Yahoo Finance"
 
 SYMBOL_RE = re.compile(r"^[A-Z0-9.\-^=]{1,20}$")
 WATCHLIST_FILE = Path(__file__).resolve().parent / "watchlist.json"
@@ -163,11 +172,22 @@ def fetch_yahoo(symbol: str, rng: str, interval: str) -> dict:
 
 
 def get_chart(symbol: str, rng: str, interval: str) -> dict:
-    """Datos de Yahoo con caché corta. Lanza ValueError (símbolo) u OfflineError (red)."""
+    """Datos de la fuente activa con caché corta. Lanza ValueError (símbolo) u OfflineError (conexión)."""
     key = (symbol, rng, interval)
     hit = _cache.get(key)
     if hit and time.time() - hit[0] < CACHE_TTL:
         return hit[1]
+    if SOURCE is not None:
+        try:
+            data = SOURCE.chart(symbol, rng, interval)
+        except ibkr.Unavailable as e:
+            log_error(symbol, str(e))
+            raise OfflineError(str(e)) from e
+        except ibkr.SymbolError as e:
+            log_error(symbol, str(e))
+            raise
+        _cache[key] = (time.time(), data)
+        return data
     try:
         data = fetch_yahoo(symbol, rng, interval)
     except urllib.error.HTTPError as e:
@@ -281,14 +301,14 @@ class Handler(SimpleHTTPRequestHandler):
             rng = "2y"  # Yahoo limita el intradía a ~730 días
 
         if p.get("demo") == "1":
-            return self._send_json(demo_series(symbol, rng, interval))
+            return self._send_json({**demo_series(symbol, rng, interval), "source": "datos simulados"})
 
         try:
-            return self._send_json(get_chart(symbol, rng, interval))
+            return self._send_json({**get_chart(symbol, rng, interval), "source": SOURCE_NAME})
         except ValueError as e:
-            return self._send_json({"error": str(e)}, 404)
+            return self._send_json({"error": str(e), "source": SOURCE_NAME}, 404)
         except OfflineError as e:
-            return self._send_json({"error": str(e), "offline": True}, 502)
+            return self._send_json({"error": str(e), "offline": True, "source": SOURCE_NAME}, 502)
 
     def api_quotes(self, p: dict):
         """Resumen de varios símbolos para la watchlist: últimos ~3 meses de cierres diarios."""
@@ -314,8 +334,13 @@ class Handler(SimpleHTTPRequestHandler):
 
     def api_search(self, p: dict):
         q = p.get("q", "").strip()
-        if not q:
+        if not q or len(q) > 40:
             return self._send_json({"results": []})
+        if SOURCE is not None:
+            try:
+                return self._send_json({"results": SOURCE.search(q)})
+            except Exception:
+                return self._send_json({"results": []})
         try:
             qs = urllib.parse.urlencode({"q": q, "quotesCount": 8, "newsCount": 0})
             data = _get_json(YAHOO_SEARCH + "?" + qs)
@@ -330,10 +355,15 @@ class Handler(SimpleHTTPRequestHandler):
 
 
 def run_check() -> int:
-    """Diagnóstico: muestra el entorno y prueba una petición real a Yahoo Finance."""
-    print("MadCow · diagnóstico de conexión con Yahoo Finance\n")
+    """Diagnóstico: muestra el entorno y prueba una petición real a la fuente de datos."""
+    print(f"MadCow · diagnóstico de conexión con {SOURCE_NAME}\n")
     print(f"Python ........ {platform.python_version()} ({sys.executable})")
     print(f"Sistema ....... {platform.platform()}")
+    if SOURCE is not None:
+        ok = SOURCE.check()
+        print("\nResultado:", "la conexión funciona." if ok else
+              "hay problemas. Copia este texto completo y compártelo.")
+        return 0 if ok else 1
     print(f"OpenSSL ....... {ssl.OPENSSL_VERSION}")
     try:
         import certifi
@@ -361,21 +391,44 @@ def run_check() -> int:
     return 0 if ok else 1
 
 
+def _report_connection():
+    """Al arrancar, intenta conectar con IBKR en segundo plano e informa en la terminal."""
+    try:
+        SOURCE._run(SOURCE._connect(), timeout=60)
+        print(f"Conectado a {ibkr.PORT_NAMES.get(SOURCE.connected_port, 'IBKR')} "
+              f"en el puerto {SOURCE.connected_port}", flush=True)
+    except ibkr.Unavailable as e:
+        print(f"Aviso: {e}. La app mostrará datos simulados hasta que esté disponible.", flush=True)
+
+
 def main():
-    global WATCHLIST_FILE
+    global WATCHLIST_FILE, SOURCE, SOURCE_NAME, CACHE_TTL
     ap = argparse.ArgumentParser(description="MadCow Charts")
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8000)
     ap.add_argument("--watchlist", type=Path, default=WATCHLIST_FILE,
                     help="archivo donde guardar los favoritos (por defecto watchlist.json)")
-    ap.add_argument("--check", action="store_true", help="diagnosticar la conexión con Yahoo Finance y salir")
+    ap.add_argument("--source", choices=("ibkr", "yahoo"), default="ibkr",
+                    help="fuente de datos (por defecto ibkr: TWS o IB Gateway)")
+    ap.add_argument("--ib-host", default="127.0.0.1", help="equipo donde corre TWS/IB Gateway")
+    ap.add_argument("--ib-port", type=int, default=None,
+                    help="puerto de la API (por defecto prueba 7496, 4001, 7497 y 4002)")
+    ap.add_argument("--ib-client-id", type=int, default=117, help="clientId para la API de IBKR")
+    ap.add_argument("--check", action="store_true", help="diagnosticar la conexión con la fuente de datos y salir")
     args = ap.parse_args()
+    if args.source == "ibkr":
+        SOURCE = ibkr.IBKRSource(args.ib_host, args.ib_port, args.ib_client_id)
+        SOURCE_NAME = ibkr.IBKRSource.name
+        CACHE_TTL = 120
     if args.check:
         sys.exit(run_check())
     WATCHLIST_FILE = args.watchlist.expanduser().resolve()
     srv = ThreadingHTTPServer((args.host, args.port), Handler)
     print(f"MadCow Charts en http://{args.host}:{args.port}  (Ctrl+C para salir)")
     print(f"Watchlist: {WATCHLIST_FILE}")
+    print(f"Datos: {SOURCE_NAME}")
+    if SOURCE is not None:
+        threading.Thread(target=_report_connection, daemon=True).start()
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

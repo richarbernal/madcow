@@ -228,7 +228,7 @@ input[type="color"] { width: 32px; height: 24px; border: 1px solid var(--border)
 .watch-row .sym b { display: block; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .watch-row .sym small { display: block; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .watch-row .num { text-align: right; white-space: nowrap; }
-.watch-row .err { grid-column: 2 / 6; color: var(--muted); text-align: right; }
+.watch-row .err { grid-column: 2 / 6; color: var(--muted); text-align: right; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .watch-row svg { display: block; }
 .watch-row .sim { font-size: 9px; color: #f5b301; font-weight: 700; margin-right: 4px; }
 .watch-row .actions {

@@ -3,32 +3,68 @@
 Un TradingView sencillo para acciones: velas, **Bandas de Bollinger**, **RSI**,
 **medias móviles por sesiones** (SMA/EMA configurables) y **comparación de dos acciones**.
 
-![](https://img.shields.io/badge/python-3.8%2B-blue) Sin dependencias: solo Python estándar.
+Requiere Python 3.10+ y una cuenta de Interactive Brokers (TWS o IB Gateway).
 
 ## Arrancar
 
+Los datos vienen de **Interactive Brokers**, a través de TWS o IB Gateway abierto en
+tu ordenador. La conexión es de **solo lectura**: la app no puede enviar órdenes.
+
+1. Instala la librería de la API (solo la primera vez):
+
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+2. Abre **TWS** (o IB Gateway) e inicia sesión.
+3. Activa la API (solo la primera vez). En TWS ve a *Archivo → Configuración global → API → Ajustes*
+   (en IB Gateway: *Configure → Settings → API → Settings*):
+   - marca **«Habilitar clientes ActiveX y Socket»**,
+   - deja **«API de solo lectura»** marcada,
+   - anota el puerto: 7496 (TWS real), 7497 (TWS simulada), 4001/4002 (Gateway).
+4. Arranca la app y abre <http://localhost:8000>:
+
+   ```bash
+   python server.py
+   ```
+
+   El puerto se detecta solo (prueba 7496, 4001, 7497 y 4002). Para fijarlo: `--ib-port 7497`.
+   La terminal indica si se ha conectado.
+
+### Permisos de datos de mercado
+
+IBKR solo entrega históricos de las bolsas para las que tu cuenta tiene **suscripción
+de datos de mercado** (se gestionan en el Portal del Cliente → Configuración →
+Suscripciones de datos de mercado). Si falta alguna, la app lo indica con
+«⚠ Sin permisos de datos» en ese valor; el resto sigue funcionando.
+
+### Si algo no funciona
+
 ```bash
-python3 server.py
+python server.py --check
 ```
 
-Abre <http://localhost:8000>. Para otro puerto: `python3 server.py --port 9000`.
+Comprueba la conexión con TWS/IB Gateway y prueba AAPL, SAN.MC, SAP.DE y el IBEX.
+Si TWS no está abierto, la app muestra **datos simulados** con un aviso bien visible.
 
-Los datos se obtienen de Yahoo Finance a través del propio servidor (el navegador
-no puede llamarlo directamente por CORS). Si no hay conexión, la app muestra
-**datos simulados** con un aviso bien visible. También puedes activar "Demo" a mano.
+### Símbolos
 
-### Si no carga datos reales
+| Mercado | Ejemplos |
+|---|---|
+| EE. UU. | `AAPL`, `MSFT`, `BRK-B` |
+| Madrid (BME) | `SAN.MC`, `ITX.MC`, `IBE.MC` |
+| Xetra / Fráncfort | `SAP.DE`, `SIE.DE` / `.F` |
+| París, Ámsterdam, Milán | `MC.PA`, `ASML.AS`, `ENI.MI` |
+| Londres, Suiza | `BP.L`, `NESN.SW` |
+| Estocolmo, Helsinki, Oslo | `VOLV-B.ST`, `NOKIA.HE`, `EQNR.OL` |
+| Índices | `^IBEX`, `^GSPC`, `^NDX`, `^GDAXI`, `^STOXX50E`, `^VIX`, o `^` + símbolo de IBKR |
 
-El aviso amarillo indica la causa. Para un diagnóstico completo:
+El buscador de símbolos usa el de IBKR.
 
-```bash
-python3 server.py --check
-```
+### Alternativa: Yahoo Finance
 
-- **Certificados SSL** (habitual en Mac): ejecuta «Install Certificates.command» de la
-  carpeta de Python en Aplicaciones, o `pip3 install certifi`.
-- **429 Too Many Requests**: Yahoo Finance no tiene API oficial y está bloqueando
-  las peticiones automáticas desde tu conexión.
+`python server.py --source yahoo` usa Yahoo Finance sin dependencias, pero Yahoo bloquea
+a menudo las peticiones automáticas (error 429).
 
 ## Funciones
 
@@ -59,7 +95,8 @@ Símbolos de Yahoo: `AAPL`, `MSFT`, `SAN.MC` (Mercado Continuo), `ITX.MC`, `^IBE
 ## Estructura
 
 ```
-server.py              servidor HTTP, proxy de Yahoo Finance y watchlist (stdlib)
+server.py              servidor HTTP, fuentes de datos y watchlist
+ibkr.py                fuente de datos Interactive Brokers (TWS / IB Gateway, solo lectura)
 watchlist.json         tus favoritos (se crea al añadir el primero; ignorado por git)
 static/index.html      interfaz
 static/app.js          lógica de gráficos, comparación y controles
