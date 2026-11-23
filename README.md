@@ -17,6 +17,19 @@ Los datos se obtienen de Yahoo Finance a través del propio servidor (el navegad
 no puede llamarlo directamente por CORS). Si no hay conexión, la app muestra
 **datos simulados** con un aviso bien visible. También puedes activar "Demo" a mano.
 
+### Si no carga datos reales
+
+El aviso amarillo indica la causa. Para un diagnóstico completo:
+
+```bash
+python3 server.py --check
+```
+
+- **Certificados SSL** (habitual en Mac): ejecuta «Install Certificates.command» de la
+  carpeta de Python en Aplicaciones, o `pip3 install certifi`.
+- **429 Too Many Requests**: Yahoo Finance no tiene API oficial y está bloqueando
+  las peticiones automáticas desde tu conexión.
+
 ## Funciones
 
 - **Favoritos (watchlist)** en la barra lateral: último precio, variación diaria, RSI y

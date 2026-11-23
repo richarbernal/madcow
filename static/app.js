@@ -91,10 +91,11 @@ async function fetchSeries(symbol) {
   let res = await fetch("/api/chart?" + q);
   let body = await res.json().catch(() => ({}));
   if (!res.ok && body.offline && !S.demo) {
+    const reason = body.error || "error desconocido";
     q.set("demo", "1");
     res = await fetch("/api/chart?" + q);
     body = await res.json();
-    body.offlineFallback = true;
+    body.offlineFallback = reason;
   }
   if (!res.ok) throw new Error(body.error || `Error ${res.status}`);
   if (!body.bars?.length) throw new Error(`Sin datos para ${symbol}`);
@@ -737,7 +738,8 @@ async function load() {
     dataA = a;
     dataB = b && !b.error ? b : null;
     const msgs = [];
-    if (a.offlineFallback || b?.offlineFallback) msgs.push("No se pudo conectar con Yahoo Finance: se muestran DATOS SIMULADOS.");
+    const offline = a.offlineFallback || b?.offlineFallback;
+    if (offline) msgs.push(`Sin datos de Yahoo Finance (${offline}). Se muestran DATOS SIMULADOS.`);
     else if (a.demo) msgs.push("Modo demo: datos simulados, no reales.");
     if (b?.error) msgs.push(`No se pudo cargar ${S.compare}: ${b.error}`);
     banner(msgs.join(" "), b?.error ? "error" : "warn");

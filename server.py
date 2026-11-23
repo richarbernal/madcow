@@ -12,13 +12,18 @@ Uso:
     python3 server.py            # http://localhost:8000
     python3 server.py --port 9000
     python3 server.py --watchlist ~/mis-favoritos.json
+    python3 server.py --check    # diagnóstico de la conexión con Yahoo Finance
 """
 import argparse
 import json
 import math
 import os
+import platform
 import random
 import re
+import socket
+import ssl
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -71,9 +76,60 @@ def write_watchlist(symbols: list) -> None:
     os.replace(tmp, WATCHLIST_FILE)  # escritura atómica
 
 
+def _ssl_context() -> ssl.SSLContext:
+    """Contexto TLS con verificación. Si está instalado `certifi`, añade sus certificados
+    (soluciona el típico CERTIFICATE_VERIFY_FAILED del Python de python.org en Mac)."""
+    ctx = ssl.create_default_context()
+    try:
+        import certifi  # opcional: pip3 install certifi
+        ctx.load_verify_locations(certifi.where())
+    except ImportError:
+        pass
+    return ctx
+
+
+SSL_CTX = _ssl_context()
+
+
+def describe_error(e: BaseException) -> str:
+    """Traduce un error de red a un mensaje que explique la causa real."""
+    if isinstance(e, urllib.error.HTTPError):
+        if e.code == 429:
+            return ("Yahoo Finance respondió 429 (Too Many Requests): está bloqueando "
+                    "las peticiones automáticas desde tu conexión")
+        if e.code in (401, 403):
+            return f"Yahoo Finance respondió {e.code}: acceso denegado"
+        return f"Yahoo Finance respondió {e.code} {e.reason}"
+    reason = getattr(e, "reason", e)
+    text = str(reason)
+    if isinstance(reason, ssl.SSLCertVerificationError) or "CERTIFICATE_VERIFY_FAILED" in text:
+        return ("error de certificados SSL de Python. En Mac ejecuta «Install Certificates.command» "
+                "(carpeta de Python en Aplicaciones) o instala certifi con: pip3 install certifi")
+    if isinstance(reason, ssl.SSLError):
+        return f"error SSL ({text}); ¿hay un antivirus o proxy inspeccionando HTTPS?"
+    if isinstance(reason, (socket.timeout, TimeoutError)):
+        return "tiempo de espera agotado al conectar con Yahoo Finance"
+    if isinstance(reason, socket.gaierror):
+        return "no se pudo resolver la dirección de Yahoo Finance (¿sin Internet o DNS bloqueado?)"
+    if isinstance(reason, (ConnectionRefusedError, ConnectionResetError)):
+        return "la conexión fue rechazada o cortada (¿firewall, antivirus o proxy?)"
+    return f"{type(reason).__name__}: {text}"
+
+
+_last_log = {"msg": None, "t": 0.0}
+
+
+def log_error(symbol: str, msg: str) -> None:
+    """Escribe el error en la terminal sin repetir el mismo mensaje más de una vez por minuto."""
+    now = time.time()
+    if msg != _last_log["msg"] or now - _last_log["t"] > 60:
+        print(f"[{time.strftime('%H:%M:%S')}] Error al pedir {symbol}: {msg}", file=sys.stderr, flush=True)
+        _last_log.update(msg=msg, t=now)
+
+
 def _get_json(url: str) -> dict:
     req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": "application/json"})
-    with urllib.request.urlopen(req, timeout=15) as resp:
+    with urllib.request.urlopen(req, timeout=15, context=SSL_CTX) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
 
@@ -117,11 +173,15 @@ def get_chart(symbol: str, rng: str, interval: str) -> dict:
     except urllib.error.HTTPError as e:
         if e.code in (400, 404):
             raise ValueError(f"Símbolo no encontrado: {symbol}") from e
-        raise OfflineError(f"Yahoo Finance respondió {e.code}") from e
+        msg = describe_error(e)
+        log_error(symbol, msg)
+        raise OfflineError(msg) from e
     except ValueError:
         raise
-    except Exception as e:  # sin red, timeout, etc.
-        raise OfflineError(f"No se pudo conectar con Yahoo Finance ({e.__class__.__name__})") from e
+    except Exception as e:  # sin red, timeout, certificados, etc.
+        msg = describe_error(e)
+        log_error(symbol, msg)
+        raise OfflineError(msg) from e
     _cache[key] = (time.time(), data)
     return data
 
@@ -269,6 +329,38 @@ class Handler(SimpleHTTPRequestHandler):
         return self._send_json({"results": results})
 
 
+def run_check() -> int:
+    """Diagnóstico: muestra el entorno y prueba una petición real a Yahoo Finance."""
+    print("MadCow · diagnóstico de conexión con Yahoo Finance\n")
+    print(f"Python ........ {platform.python_version()} ({sys.executable})")
+    print(f"Sistema ....... {platform.platform()}")
+    print(f"OpenSSL ....... {ssl.OPENSSL_VERSION}")
+    try:
+        import certifi
+        certifi_info = f"instalado ({certifi.where()})"
+    except ImportError:
+        certifi_info = "no instalado"
+    print(f"certifi ....... {certifi_info}")
+    print(f"Certificados .. {SSL_CTX.cert_store_stats().get('x509_ca', 0)} autoridades cargadas")
+    proxies = {k: v for k, v in urllib.request.getproxies().items() if k in ("http", "https", "all")}
+    print(f"Proxy ......... {', '.join(f'{k}={v}' for k, v in proxies.items()) or 'ninguno'}\n")
+
+    ok = False
+    for host in ("query1.finance.yahoo.com", "query2.finance.yahoo.com"):
+        url = f"https://{host}/v8/finance/chart/AAPL?range=5d&interval=1d"
+        print(f"Probando {host} … ", end="", flush=True)
+        try:
+            data = _get_json(url)
+            n = len(data["chart"]["result"][0]["timestamp"])
+            print(f"OK ({n} sesiones de AAPL recibidas)")
+            ok = True
+        except Exception as e:
+            print(f"FALLO\n    → {describe_error(e)}")
+    print("\nResultado:", "la conexión funciona." if ok else
+          "no se pudo obtener datos. Copia este texto completo y compártelo.")
+    return 0 if ok else 1
+
+
 def main():
     global WATCHLIST_FILE
     ap = argparse.ArgumentParser(description="MadCow Charts")
@@ -276,7 +368,10 @@ def main():
     ap.add_argument("--port", type=int, default=8000)
     ap.add_argument("--watchlist", type=Path, default=WATCHLIST_FILE,
                     help="archivo donde guardar los favoritos (por defecto watchlist.json)")
+    ap.add_argument("--check", action="store_true", help="diagnosticar la conexión con Yahoo Finance y salir")
     args = ap.parse_args()
+    if args.check:
+        sys.exit(run_check())
     WATCHLIST_FILE = args.watchlist.expanduser().resolve()
     srv = ThreadingHTTPServer((args.host, args.port), Handler)
     print(f"MadCow Charts en http://{args.host}:{args.port}  (Ctrl+C para salir)")
