@@ -38,6 +38,26 @@ de datos de mercado** (se gestionan en el Portal del Cliente → Configuración 
 Suscripciones de datos de mercado). Si falta alguna, la app lo indica con
 «⚠ Sin permisos de datos» en ese valor; el resto sigue funcionando.
 
+### Acceso desde otros dispositivos (móvil, tablet, otro PC)
+
+Por defecto la app solo se abre desde el propio PC. Para usarla desde la red local:
+
+```bash
+python server.py --lan --password una-clave
+```
+
+- La terminal muestra la dirección que hay que abrir en el otro dispositivo
+  (p. ej. `http://192.168.1.34:8000`, o `http://nombre-del-pc:8000`).
+- Los demás dispositivos piden la contraseña una vez (el usuario da igual); el propio
+  PC no la pide. También se puede indicar con la variable de entorno `MADCOW_PASSWORD`.
+- **Windows** preguntará si permite a Python comunicarse en la red: acepta para
+  **redes privadas**. Si tu Wi-Fi está marcada como «pública», cámbiala a «privada».
+- TWS sigue funcionando solo en el PC: los demás dispositivos ven los datos a través de la app.
+- Solo se aceptan peticiones dirigidas a la IP o al nombre del PC; si usas otro nombre
+  (p. ej. un DNS propio), añádelo con `--allow-host nombre`.
+
+No la expongas a Internet (abriendo puertos en el router): no está pensada para ello.
+
 ### Caché de datos históricos
 
 Las velas se guardan en `cache.sqlite` (junto a `server.py`, no se sube a git):

@@ -18,12 +18,16 @@ Uso:
     python3 server.py --check    # diagnóstico de la conexión con la fuente de datos
     python3 server.py --ib-port 7497   # forzar puerto de TWS/IB Gateway (por defecto se detecta)
     python3 server.py --clear-cache    # borrar la caché de datos históricos
+    python3 server.py --lan --password secreto   # accesible desde la red local, con contraseña
 
 Los datos históricos se guardan en cache.sqlite: la segunda vez solo se piden las
 velas nuevas y, si TWS está cerrado, se muestran los datos guardados.
 """
 import argparse
+import base64
 import datetime as dt
+import hmac
+import ipaddress
 import json
 import math
 import os
@@ -318,6 +322,51 @@ def demo_series(symbol: str, rng: str, interval: str) -> dict:
             "exchange": "DEMO", "bars": bars, "demo": True}
 
 
+# ---------------------------------------------------------------------------
+# Acceso desde la red local
+# ---------------------------------------------------------------------------
+PASSWORD = ""             # si no está vacía, se pide a los dispositivos que no sean este PC
+EXTRA_HOSTS: set = set()  # nombres adicionales permitidos en la cabecera Host (--allow-host)
+LOCAL_SUFFIXES = ("", ".local", ".lan", ".home", ".localdomain", ".home.arpa", ".fritz.box")
+
+
+def host_allowed(header: str) -> bool:
+    """Solo se aceptan peticiones dirigidas a una IP, a localhost o al nombre de este PC.
+    Evita que una web maliciosa use 'DNS rebinding' para leer la app desde tu navegador."""
+    host = (header or "").strip().lower()
+    if host.startswith("["):                 # IPv6: [::1]:8000
+        host = host[1:host.find("]")]
+    elif host.count(":") == 1:               # quitar el puerto
+        host = host.split(":")[0]
+    if not host:
+        return False
+    try:
+        ipaddress.ip_address(host)
+        return True
+    except ValueError:
+        pass
+    if host == "localhost" or host in EXTRA_HOSTS:
+        return True
+    name = socket.gethostname().lower().split(".")[0]
+    return any(host == name + suffix for suffix in LOCAL_SUFFIXES)
+
+
+def lan_addresses() -> list:
+    """IPs de este PC en la red local (sin enviar nada por la red)."""
+    ips = set()
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("10.255.255.255", 1))  # UDP: no envía paquetes, solo elige la interfaz
+            ips.add(s.getsockname()[0])
+    except OSError:
+        pass
+    try:
+        ips.update(socket.gethostbyname_ex(socket.gethostname())[2])
+    except OSError:
+        pass
+    return sorted(ip for ip in ips if ipaddress.ip_address(ip).is_private and not ipaddress.ip_address(ip).is_loopback)
+
+
 class Handler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(STATIC_DIR), **kwargs)
@@ -334,7 +383,39 @@ class Handler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _allowed(self) -> bool:
+        """Comprueba la cabecera Host y, si hay contraseña, la autenticación. Si no pasa, responde."""
+        if not host_allowed(self.headers.get("Host", "")):
+            self._send_json({"error": "Host no permitido. Usa la IP o el nombre de este PC "
+                                      "(o añádelo con --allow-host)."}, 403)
+            return False
+        if not PASSWORD or ipaddress.ip_address(self.client_address[0]).is_loopback:
+            return True
+        auth = self.headers.get("Authorization", "")
+        if auth.startswith("Basic "):
+            try:
+                _, _, given = base64.b64decode(auth[6:]).decode("utf-8").partition(":")
+            except (ValueError, UnicodeDecodeError):
+                given = ""
+            if hmac.compare_digest(given.encode(), PASSWORD.encode()):
+                return True
+            time.sleep(1)  # frena los intentos a ciegas
+        body = "Se necesita la contraseña de MadCow (el usuario da igual).".encode("utf-8")
+        self.send_response(401)
+        self.send_header("WWW-Authenticate", 'Basic realm="MadCow", charset="UTF-8"')
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+        return False
+
+    def do_HEAD(self):
+        if self._allowed():
+            super().do_HEAD()
+
     def do_GET(self):
+        if not self._allowed():
+            return
         parsed = urllib.parse.urlparse(self.path)
         params = dict(urllib.parse.parse_qsl(parsed.query))
         if parsed.path == "/api/chart":
@@ -349,6 +430,8 @@ class Handler(SimpleHTTPRequestHandler):
         return super().do_GET()
 
     def do_PUT(self):
+        if not self._allowed():
+            return
         if urllib.parse.urlparse(self.path).path != "/api/watchlist":
             return self._send_json({"error": "No encontrado"}, 404)
         # Exigir JSON obliga al navegador a hacer preflight CORS, que este servidor
@@ -498,9 +581,16 @@ def _report_connection():
 
 
 def main():
-    global WATCHLIST_FILE, SOURCE, SOURCE_NAME, SOURCE_KEY, CACHE_TTL, CACHE
+    global WATCHLIST_FILE, SOURCE, SOURCE_NAME, SOURCE_KEY, CACHE_TTL, CACHE, PASSWORD
     ap = argparse.ArgumentParser(description="MadCow Charts")
-    ap.add_argument("--host", default="127.0.0.1")
+    ap.add_argument("--host", default="127.0.0.1",
+                    help="dirección en la que escuchar (por defecto solo este PC)")
+    ap.add_argument("--lan", action="store_true",
+                    help="permitir el acceso desde otros dispositivos de la red local (equivale a --host 0.0.0.0)")
+    ap.add_argument("--password", default=os.environ.get("MADCOW_PASSWORD", ""),
+                    help="contraseña para los dispositivos de la red (o variable de entorno MADCOW_PASSWORD)")
+    ap.add_argument("--allow-host", action="append", default=[], metavar="NOMBRE",
+                    help="nombre adicional con el que se accede a la app (p. ej. un nombre DNS propio)")
     ap.add_argument("--port", type=int, default=8000)
     ap.add_argument("--watchlist", type=Path, default=WATCHLIST_FILE,
                     help="archivo donde guardar los favoritos (por defecto watchlist.json)")
@@ -531,8 +621,22 @@ def main():
     if args.check:
         sys.exit(run_check())
     WATCHLIST_FILE = args.watchlist.expanduser().resolve()
-    srv = ThreadingHTTPServer((args.host, args.port), Handler)
-    print(f"MadCow Charts en http://{args.host}:{args.port}  (Ctrl+C para salir)")
+    host = "0.0.0.0" if args.lan else args.host
+    PASSWORD = args.password
+    EXTRA_HOSTS.update(h.strip().lower() for h in args.allow_host if h.strip())
+    srv = ThreadingHTTPServer((host, args.port), Handler)
+    if host in ("127.0.0.1", "localhost", "::1"):
+        print(f"MadCow Charts en http://localhost:{args.port}  (Ctrl+C para salir)")
+    else:
+        print(f"MadCow Charts en http://localhost:{args.port}  (Ctrl+C para salir)")
+        urls = [f"http://{ip}:{args.port}" for ip in lan_addresses()] if host == "0.0.0.0" else [f"http://{host}:{args.port}"]
+        urls.append(f"http://{socket.gethostname().lower()}:{args.port}")
+        print("Desde otros dispositivos de tu red: " + "  ·  ".join(urls))
+        if PASSWORD:
+            print("Se pedirá contraseña a los demás dispositivos (el usuario da igual).")
+        else:
+            print("Aviso: sin contraseña, cualquiera conectado a tu red puede ver la app y cambiar tus "
+                  "favoritos. Usa --password para protegerla.")
     print(f"Watchlist: {WATCHLIST_FILE}")
     print(f"Datos: {SOURCE_NAME}")
     if args.no_cache:
