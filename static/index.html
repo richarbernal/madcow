@@ -67,7 +67,7 @@
           <button type="button" id="starBtn" class="star" title="Añadir a favoritos" aria-pressed="false">☆</button>
           <span id="qSymbol">—</span><span id="qName" class="muted"></span>
         </div>
-        <div class="q-price"><span id="qLast">—</span> <span id="qChange"></span><div class="q-ext" id="qExt" hidden></div></div>
+        <div class="q-price"><span id="qLast">—</span> <span id="qChange"></span><div class="q-ext" id="qExt" hidden></div><div class="q-ext" id="qPos" hidden></div></div>
       </div>
 
       <div class="pane pane-price">
@@ -101,6 +101,7 @@
     <aside class="sidebar">
       <div class="tabs" role="tablist">
         <button type="button" role="tab" data-tab="watch">★ Favoritos</button>
+        <button type="button" role="tab" data-tab="pos">Cartera</button>
         <button type="button" role="tab" data-tab="ind">Indicadores</button>
       </div>
 
@@ -124,6 +125,20 @@
           </div>
         </section>
         <p class="muted small hint">Clic: abrir · <b>vs</b>: comparar · arrastra para ordenar · ↑/↓ para moverte por la lista</p>
+      </div>
+
+      <div class="tab-body" data-tab="pos" role="tabpanel" hidden>
+        <section class="panel pos-panel">
+          <div class="pos-summary" id="posSummary"></div>
+          <div class="pos-head" aria-hidden="true"><span>Posición</span><span>Valor · coste</span><span>P&amp;G latente</span></div>
+          <ul id="posList" class="pos-list"></ul>
+          <p id="posMsg" class="muted small pos-msg" hidden></p>
+          <div class="watch-foot muted small">
+            <span id="posUpdated"></span>
+            <button type="button" id="posRefresh" class="link-btn">↻ Actualizar</button>
+          </div>
+        </section>
+        <p class="muted small hint">Valoración de IBKR (TWS la actualiza cada ~3 min). Clic en una posición para ver su gráfico.</p>
       </div>
 
       <div class="tab-body" data-tab="ind" role="tabpanel" hidden>

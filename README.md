@@ -38,6 +38,20 @@ de datos de mercado** (se gestionan en el Portal del Cliente → Configuración 
 Suscripciones de datos de mercado). Si falta alguna, la app lo indica con
 «⚠ Sin permisos de datos» en ese valor; el resto sigue funcionando.
 
+### Cartera (posiciones de IBKR)
+
+La pestaña **Cartera** muestra tus posiciones con la valoración que calcula IBKR
+(precio, valor de mercado, coste medio y P&G latente), y un resumen de la cuenta:
+valor de las posiciones, P&G total, valor liquidativo y efectivo, en tu divisa base.
+
+- Clic en una posición para abrir su gráfico; ahí verás tu **coste medio** como línea
+  horizontal y tu posición junto a la cotización.
+- TWS envía la valoración cada ~3 minutos. Se incluyen opciones y otros productos,
+  aunque solo las acciones abren gráfico.
+- Son datos privados: no se guardan en disco y, desde otros dispositivos de la red,
+  solo se muestran si la app está protegida con `--password`.
+- `--no-positions` desactiva por completo la lectura de la cartera.
+
 ### Acceso desde otros dispositivos (móvil, tablet, otro PC)
 
 Por defecto la app solo se abre desde el propio PC. Para usarla desde la red local:

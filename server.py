@@ -424,6 +424,8 @@ class Handler(SimpleHTTPRequestHandler):
             return self.api_search(params)
         if parsed.path == "/api/quotes":
             return self.api_quotes(params)
+        if parsed.path == "/api/positions":
+            return self.api_positions()
         if parsed.path == "/api/watchlist":
             with _wl_lock:
                 return self._send_json({"symbols": read_watchlist()})
@@ -480,6 +482,21 @@ class Handler(SimpleHTTPRequestHandler):
             return self._send_json({"error": str(e), "source": SOURCE_NAME}, 404)
         except OfflineError as e:
             return self._send_json({"error": str(e), "offline": True, "source": SOURCE_NAME}, 502)
+
+    def api_positions(self):
+        """Posiciones de la cuenta de IBKR. Son datos privados: desde otros dispositivos
+        solo se sirven si la app está protegida con contraseña."""
+        if SOURCE is None:
+            return self._send_json({"available": False,
+                                    "reason": "Las posiciones solo están disponibles con Interactive Brokers."})
+        if not PASSWORD and not ipaddress.ip_address(self.client_address[0]).is_loopback:
+            return self._send_json({"available": False, "reason":
+                                    "Por seguridad, tus posiciones solo se muestran en el PC donde corre la app. "
+                                    "Para verlas desde otros dispositivos, arráncala con --password."}, 403)
+        try:
+            return self._send_json(SOURCE.positions())
+        except ibkr.Unavailable as e:
+            return self._send_json({"available": False, "reason": f"No se pueden leer las posiciones: {e}"})
 
     def api_quotes(self, p: dict):
         """Resumen de varios símbolos para la watchlist: últimos ~3 meses de cierres diarios."""
@@ -600,6 +617,8 @@ def main():
     ap.add_argument("--ib-port", type=int, default=None,
                     help="puerto de la API (por defecto prueba 7496, 4001, 7497 y 4002)")
     ap.add_argument("--ib-client-id", type=int, default=117, help="clientId para la API de IBKR")
+    ap.add_argument("--no-positions", action="store_true",
+                    help="no leer las posiciones de la cuenta de IBKR")
     ap.add_argument("--check", action="store_true", help="diagnosticar la conexión con la fuente de datos y salir")
     ap.add_argument("--cache", type=Path, default=BASE_DIR / "cache.sqlite",
                     help="archivo de la caché de datos históricos (por defecto cache.sqlite)")
@@ -614,7 +633,8 @@ def main():
         print(f"Caché borrada: {cache_path}" if removed else f"No había caché en {cache_path}")
         sys.exit(0)
     if args.source == "ibkr":
-        SOURCE = ibkr.IBKRSource(args.ib_host, args.ib_port, args.ib_client_id)
+        SOURCE = ibkr.IBKRSource(args.ib_host, args.ib_port, args.ib_client_id,
+                                 positions=not args.no_positions)
         SOURCE_NAME = ibkr.IBKRSource.name
         SOURCE_KEY = "ibkr"
         CACHE_TTL = 120

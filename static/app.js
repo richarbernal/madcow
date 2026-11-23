@@ -222,6 +222,8 @@ function renderPrice(keepRange = true) {
     }));
   }
   priceSeries.push(mainSeries);
+  costLine = null; // la línea anterior se fue con la serie
+  updatePositionOverlay();
   priceChart.priceScale("right").applyOptions({ scaleMargins: { top: 0.08, bottom: S.vol ? 0.2 : 0.06 } });
 
   renderRsi();
@@ -712,7 +714,7 @@ function renderWatchlist() {
   });
 
   // Refresco automático cada minuto mientras la pestaña esté visible
-  setInterval(() => { if (document.visibilityState === "visible") { refreshQuotes(); loadExt(); } }, 60_000);
+  setInterval(() => { if (document.visibilityState === "visible") { refreshQuotes(); loadExt(); loadPositions(); } }, 60_000);
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "visible" && (!WL.updated || Date.now() - WL.updated > 60_000)) refreshQuotes();
   });
@@ -755,6 +757,98 @@ async function loadExt() {
 }
 
 // ---------------------------------------------------------------------------
+// Cartera: posiciones de la cuenta de IBKR (valoración calculada por IBKR)
+// ---------------------------------------------------------------------------
+let POS = null;       // última respuesta de /api/positions
+let costLine = null;  // línea de coste medio en el gráfico
+
+function fmtMoney(v, cur, dec) {
+  if (v == null || !isFinite(v)) return "—";
+  const d = dec ?? (Math.abs(v) >= 1000 ? 0 : 2);
+  try {
+    return new Intl.NumberFormat("es-ES", { style: "currency", currency: cur || "EUR",
+      minimumFractionDigits: d, maximumFractionDigits: d }).format(v);
+  } catch { return `${fmt(v, d)} ${cur || ""}`; }
+}
+const signedMoney = (v, cur) => (v > 0 ? "+" : "") + fmtMoney(v, cur);
+const fmtQty = (q) => nf(Number.isInteger(q) ? 0 : 2).format(q);
+const tone = (v) => ((v ?? 0) >= 0 ? "up" : "down");
+const positionFor = (sym) => (POS?.available ? POS.positions.find((p) => p.symbol === sym && p.type === "STK") : null);
+
+async function loadPositions() {
+  try {
+    const res = await fetch("/api/positions");
+    POS = await res.json();
+  } catch {
+    POS = { available: false, reason: "No se pudo contactar con el servidor de la app." };
+  }
+  renderPositions();
+  updatePositionOverlay();
+}
+
+function renderPositions() {
+  const list = $("posList"), msg = $("posMsg");
+  if (!POS?.available) {
+    list.innerHTML = "";
+    $("posSummary").innerHTML = "";
+    $("posUpdated").textContent = "";
+    msg.hidden = false;
+    msg.textContent = POS ? POS.reason : "Cargando posiciones…";
+    return;
+  }
+  const base = POS.base;
+  $("posSummary").innerHTML = [
+    ["Valor de las posiciones", fmtMoney(POS.total_value, base), ""],
+    ["P&G latente", `<span class="${tone(POS.total_pnl)}">${signedMoney(POS.total_pnl, base)}</span>`,
+      POS.total_pnl_pct == null ? "" : `<span class="${tone(POS.total_pnl_pct)}">${pct(POS.total_pnl_pct)}</span>`],
+    ["Valor liquidativo", fmtMoney(POS.net_liquidation, base), ""],
+    ["Efectivo", fmtMoney(POS.cash, base), ""],
+  ].map(([k, v, extra]) => `<div class="kpi"><small>${k}</small><b>${v}</b> ${extra}</div>`).join("");
+
+  const notes = [];
+  if (!POS.positions.length) notes.push("No tienes posiciones abiertas.");
+  if (POS.unvalued) notes.push(`${POS.unvalued} posición(es) aún sin valorar: TWS envía la valoración cada ~3 minutos.`);
+  if (POS.multi_account) notes.push("Tienes varias cuentas: IBKR solo valora la principal.");
+  msg.hidden = !notes.length;
+  msg.textContent = notes.join(" ");
+
+  list.innerHTML = POS.positions.map((p) => {
+    const cls = ["pos-row", p.symbol && "link", p.symbol && p.symbol === S.symbol && "active"].filter(Boolean).join(" ");
+    const kind = p.type !== "STK" ? `<span class="kind">${esc(p.type)}</span>` : "";
+    const title = [p.name || p.label, p.account && `cuenta ${p.account}`].filter(Boolean).join(" · ");
+    return `<li class="${cls}"${p.symbol ? ` data-sym="${esc(p.symbol)}"` : ""} title="${esc(title)}">
+      <span><b>${esc(p.symbol || p.label)}${kind}</b><small>${fmtQty(p.qty)} × ${fmtMoney(p.price, p.currency, 2)}</small></span>
+      <span class="num"><b>${fmtMoney(p.value, p.currency)}</b><small title="Coste medio">${fmtMoney(p.avg_price, p.currency, 2)}</small></span>
+      <span class="num"><b class="${tone(p.pnl)}">${p.pnl == null ? "—" : signedMoney(p.pnl, p.currency)}</b>
+        <small class="${tone(p.pnl_pct)}">${p.pnl_pct == null ? "—" : pct(p.pnl_pct)}</small></span></li>`;
+  }).join("");
+  $("posUpdated").textContent = "Actualizado " +
+    new Date(POS.time * 1000).toLocaleTimeString("es-ES", { hour: "2-digit", minute: "2-digit" });
+}
+
+// Coste medio en el gráfico y resumen de tu posición junto a la cotización
+function updatePositionOverlay() {
+  if (costLine && mainSeries) { try { mainSeries.removePriceLine(costLine); } catch { /* serie ya rehecha */ } }
+  costLine = null;
+  const p = positionFor(S.symbol), el = $("qPos");
+  if (!p || !mainSeries || !dataA || dataA.demo || p.currency !== dataA.currency) { el.hidden = true; return; }
+  costLine = mainSeries.createPriceLine({
+    price: p.avg_price, color: "#f5b301", lineWidth: 1, lineStyle: LWC.LineStyle.Dashed,
+    axisLabelVisible: true, title: "Coste medio",
+  });
+  el.hidden = false;
+  el.innerHTML = `<span class="muted">Tu posición:</span> ${fmtQty(p.qty)} · coste ${fmtMoney(p.avg_price, p.currency, 2)} · ` +
+    `<span class="${tone(p.pnl)}">${p.pnl == null ? "—" : signedMoney(p.pnl, p.currency)}` +
+    `${p.pnl_pct == null ? "" : ` (${pct(p.pnl_pct)})`}</span>`;
+}
+
+$("posList").addEventListener("click", (e) => {
+  const sym = e.target.closest("li[data-sym]")?.dataset.sym;
+  if (sym && sym !== S.symbol) { S.symbol = sym; load(); }
+});
+$("posRefresh").addEventListener("click", () => loadPositions());
+
+// ---------------------------------------------------------------------------
 // Carga y render global
 // ---------------------------------------------------------------------------
 function banner(msg, kind = "warn") {
@@ -773,6 +867,7 @@ function recompute(keepRange = true) {
   renderSignals();
   renderCompare();
   renderWatchlist();
+  renderPositions();
 }
 
 let loadToken = 0;
@@ -918,7 +1013,7 @@ function setTab(t) {
 }
 document.querySelector(".tabs").addEventListener("click", (e) => {
   const t = e.target.closest("button")?.dataset.tab;
-  if (t) { setTab(t); save(); }
+  if (t) { setTab(t); save(); if (t === "pos") loadPositions(); }
 });
 
 function applyTheme() {
@@ -997,3 +1092,4 @@ applyTheme();
 setTab(S.sideTab);
 load();
 wlFetch();
+loadPositions();

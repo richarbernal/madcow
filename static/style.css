@@ -254,3 +254,26 @@ input[type="color"] { width: 32px; height: 24px; border: 1px solid var(--border)
 .watch-row .ext.up { color: var(--up); }
 .watch-row .ext.down { color: var(--down); }
 .panel-note { margin: 0; }
+
+/* ---------- Cartera (posiciones de IBKR) ---------- */
+.tabs button { padding: 7px 2px; }
+.pos-panel { padding: 8px 6px; }
+.pos-summary { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 2px 6px 10px; }
+.pos-summary .kpi small { display: block; color: var(--muted); font-size: 11px; }
+.pos-summary .kpi b { font-size: 15px; font-variant-numeric: tabular-nums; }
+.pos-summary .kpi span { font-size: 12px; font-variant-numeric: tabular-nums; }
+.pos-head, .pos-row { display: grid; grid-template-columns: minmax(0, 1fr) 92px 88px; gap: 6px; align-items: center; }
+.pos-head { padding: 0 6px 4px; font-size: 11px; color: var(--muted); border-bottom: 1px solid var(--border); }
+.pos-head span:nth-child(n+2) { text-align: right; }
+.pos-list { list-style: none; margin: 0; padding: 0; }
+.pos-row { padding: 6px; border-radius: 6px; font-size: 12px; font-variant-numeric: tabular-nums; border-left: 3px solid transparent; }
+.pos-row.link { cursor: pointer; }
+.pos-row.link:hover { background: var(--panel-2); }
+.pos-row.active { background: color-mix(in srgb, var(--accent) 14%, transparent); border-left-color: var(--accent); }
+.pos-row b, .pos-row small { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pos-row small { color: var(--muted); font-size: 11px; }
+.pos-row .num { text-align: right; }
+.pos-row .num small.up { color: var(--up); }
+.pos-row .num small.down { color: var(--down); }
+.pos-row .kind { font-size: 9px; font-weight: 700; color: var(--muted); border: 1px solid var(--border); border-radius: 3px; padding: 0 3px; margin-left: 4px; }
+.pos-msg { padding: 10px 6px; margin: 0; }

@@ -1,7 +1,8 @@
 """Fuente de datos Interactive Brokers para MadCow (TWS o IB Gateway).
 
 Usa la API oficial de TWS a través de la librería `ib_async` (pip install ib_async).
-La conexión es de SOLO LECTURA: la app no puede enviar órdenes.
+La conexión es de SOLO LECTURA: la app no puede enviar órdenes. Si las posiciones están
+activadas, también se leen las posiciones y su valoración (nunca órdenes ni ejecuciones).
 
 Los símbolos de la app siguen el formato habitual (estilo Yahoo) y aquí se
 traducen al contrato de IBKR:
@@ -20,6 +21,7 @@ import asyncio
 import concurrent.futures
 import datetime as dt
 import logging
+import math
 import threading
 import time
 
@@ -106,7 +108,7 @@ def app_symbol(contract) -> str | None:
     if contract.secType != "STK":
         return None
     exch = contract.primaryExchange or contract.exchange
-    if exch in US_EXCHANGES:
+    if exch in US_EXCHANGES or (exch in ("", "SMART") and contract.currency == "USD"):
         return contract.symbol.replace(" ", "-")
     suffix = EXCHANGE_TO_SUFFIX.get(exch)
     if not suffix:
@@ -175,10 +177,13 @@ def _duration(rng: str, interval: str) -> str:
 class IBKRSource:
     name = "Interactive Brokers"
 
-    def __init__(self, host: str = "127.0.0.1", port: int | None = None, client_id: int = 117):
+    def __init__(self, host: str = "127.0.0.1", port: int | None = None, client_id: int = 117,
+                 positions: bool = True):
         self.host = host
         self.ports = (port,) if port else DEFAULT_PORTS
         self.client_id = client_id
+        self.positions_enabled = positions
+        self._by_conid: dict = {}     # conId → (contrato completo, nombre)
         self.connected_port: int | None = None
         self._ib = None
         self._errors: list = []
@@ -219,14 +224,21 @@ class IBKRSource:
         if self._ib is None:
             self._ib = ib_async.IB()
             self._ib.errorEvent += self._on_error
-        no_fetch = ib_async.ib.StartupFetch(0)  # solo datos: no pedir cartera ni órdenes
+        sf = ib_async.ib.StartupFetch
+        # Nunca se piden órdenes ni ejecuciones. Con posiciones activadas se suscribe a la
+        # valoración de la cartera (TWS la actualiza cada ~3 minutos).
+        fetch = sf.POSITIONS | sf.ACCOUNT_UPDATES if self.positions_enabled else sf(0)
         tried = []
         for port in self.ports:
             for cid in (self.client_id, self.client_id + 1, self.client_id + 2):
                 try:
-                    await self._ib.connectAsync(self.host, port, clientId=cid, timeout=5,
-                                                readonly=True, fetchFields=no_fetch)
+                    await self._ib.connectAsync(self.host, port, clientId=cid, timeout=10,
+                                                readonly=True, fetchFields=fetch)
                     self.connected_port = port
+                    accounts = self._ib.managedAccounts()
+                    if self.positions_enabled and len(accounts) > 1:
+                        # con varias cuentas, IBKR solo valora una a la vez: la principal
+                        await self._ib.reqAccountUpdatesAsync(accounts[0])
                     return self._ib
                 except (ConnectionRefusedError, asyncio.TimeoutError, TimeoutError):
                     self._ib.disconnect()
@@ -334,6 +346,95 @@ class IBKRSource:
         """Velas del rango pedido; con `since`, solo las posteriores a esa fecha (aprox.)."""
         return self._run(self._chart(symbol, rng, interval, rth, since))
 
+    async def _positions(self) -> dict:
+        from ib_async import Contract
+
+        if not self.positions_enabled:
+            raise Unavailable("las posiciones están desactivadas (se arrancó con --no-positions)")
+        async with self._lock:
+            ib = await self._connect()
+            positions = [p for p in ib.positions() if p.position]
+            for p in positions:  # nombre y bolsa principal (una sola vez por contrato)
+                cid = p.contract.conId
+                if cid not in self._by_conid:
+                    details = await ib.reqContractDetailsAsync(Contract(conId=cid))
+                    self._by_conid[cid] = ((details[0].contract, details[0].longName) if details
+                                           else (p.contract, ""))
+            portfolio = {(i.account, i.contract.conId): i for i in ib.portfolio()}
+            values = ib.accountValues()
+            accounts = ib.managedAccounts()
+
+        def num(v):
+            return v if isinstance(v, (int, float)) and math.isfinite(v) else None
+
+        rates, base, net_liq, cash = {}, None, None, None
+        for v in values:
+            try:
+                val = float(v.value)
+            except (TypeError, ValueError):
+                continue
+            if v.tag == "ExchangeRate" and v.currency != "BASE":
+                rates[v.currency] = val
+            elif v.tag == "NetLiquidation":
+                base, net_liq = v.currency, val
+            elif v.tag == "TotalCashValue" and v.currency != "BASE":
+                cash = val
+        if base:
+            rates.setdefault(base, 1.0)
+
+        rows = []
+        for p in positions:
+            contract, name = self._by_conid[p.contract.conId]
+            item = portfolio.get((p.account, p.contract.conId))
+            try:
+                mult = float(contract.multiplier) if contract.multiplier else 1.0
+            except ValueError:
+                mult = 1.0
+            cost = p.position * p.avgCost
+            price = num(item.marketPrice) if item else None
+            value = num(item.marketValue) if item else None
+            pnl = num(item.unrealizedPNL) if item else None
+            rate = rates.get(contract.currency)
+            rows.append({
+                "symbol": app_symbol(contract),
+                "label": contract.localSymbol or contract.symbol,
+                "name": name,
+                "type": contract.secType,
+                "currency": contract.currency,
+                "qty": p.position,
+                "avg_price": p.avgCost / mult,     # por acción (o por unidad del subyacente)
+                "price": price if price and price > 0 else None,
+                "cost": cost,
+                "value": value,
+                "pnl": pnl,
+                "pnl_pct": pnl / abs(cost) if pnl is not None and cost else None,
+                "value_base": value * rate if value is not None and rate else None,
+                "pnl_base": pnl * rate if pnl is not None and rate else None,
+                "cost_base": cost * rate if rate else None,
+                "account": ("…" + p.account[-4:]) if len(accounts) > 1 else None,
+            })
+        rows.sort(key=lambda r: abs(r["value_base"] or 0), reverse=True)
+        valued = [r for r in rows if r["value_base"] is not None and r["cost_base"] is not None]
+        total_value = sum(r["value_base"] for r in valued)
+        total_pnl = sum(r["pnl_base"] or 0 for r in valued)
+        total_cost = sum(r["cost_base"] for r in valued)
+        return {
+            "available": True,
+            "base": base,
+            "net_liquidation": net_liq,
+            "cash": cash,
+            "total_value": total_value if valued else None,
+            "total_pnl": total_pnl if valued else None,
+            "total_pnl_pct": total_pnl / abs(total_cost) if valued and total_cost else None,
+            "unvalued": len(rows) - len(valued),
+            "multi_account": len(accounts) > 1,
+            "positions": rows,
+            "time": int(time.time()),
+        }
+
+    def positions(self) -> dict:
+        return self._run(self._positions(), timeout=60)
+
     def extended(self, symbol: str) -> dict | None:
         return self._run(self._extended(symbol))
 
@@ -364,6 +465,15 @@ class IBKRSource:
                 last = d["bars"][-1]
                 print(f"OK ({len(d['bars'])} sesiones, último cierre {last['close']:.2f} {d['currency']}) · {d['name']}")
             except (SymbolError, Unavailable) as e:
+                print(f"FALLO\n    → {e}")
+                ok = False
+        if self.positions_enabled:
+            print("Posiciones .... ", end="", flush=True)
+            try:
+                d = self.positions()
+                print(f"OK ({len(d['positions'])} posiciones"
+                      + (f", {d['unvalued']} sin valorar" if d["unvalued"] else "") + ")")
+            except Unavailable as e:
                 print(f"FALLO\n    → {e}")
                 ok = False
         return ok
