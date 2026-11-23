@@ -38,6 +38,19 @@ de datos de mercado** (se gestionan en el Portal del Cliente → Configuración 
 Suscripciones de datos de mercado). Si falta alguna, la app lo indica con
 «⚠ Sin permisos de datos» en ese valor; el resto sigue funcionando.
 
+### Caché de datos históricos
+
+Las velas se guardan en `cache.sqlite` (junto a `server.py`, no se sube a git):
+
+- La primera vez que abres un valor se descarga el rango completo; después solo se
+  piden a IBKR las sesiones nuevas, así que los gráficos cargan antes.
+- Si TWS está cerrado, la app muestra los **datos guardados** con un aviso de cuándo
+  se actualizaron (en favoritos, con la marca «CACHÉ»). Solo los valores que nunca
+  se han abierto pasan a datos simulados.
+- Si un split o un ajuste cambia el histórico, se detecta y la serie se descarga de nuevo.
+- `python server.py --clear-cache` la borra; `--no-cache` trabaja sin ella y
+  `--cache RUTA` la guarda en otro sitio.
+
 ### Si algo no funciona
 
 ```bash
@@ -101,6 +114,8 @@ Símbolos de Yahoo: `AAPL`, `MSFT`, `SAN.MC` (Mercado Continuo), `ITX.MC`, `^IBE
 ```
 server.py              servidor HTTP, fuentes de datos y watchlist
 ibkr.py                fuente de datos Interactive Brokers (TWS / IB Gateway, solo lectura)
+histcache.py           caché de datos históricos en disco (SQLite)
+cache.sqlite           la caché (se crea sola; ignorada por git)
 watchlist.json         tus favoritos (se crea al añadir el primero; ignorado por git)
 static/index.html      interfaz
 static/app.js          lógica de gráficos, comparación y controles

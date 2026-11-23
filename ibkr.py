@@ -69,7 +69,8 @@ INDICES = {
 DURATIONS = {"1mo": "1 M", "3mo": "3 M", "6mo": "6 M", "1y": "1 Y", "2y": "2 Y",
              "5y": "5 Y", "10y": "10 Y", "max": "30 Y"}
 BAR_SIZES = {"1h": "1 hour", "1d": "1 day", "1wk": "1 week", "1mo": "1 month"}
-DEFAULT_PORTS = (7496, 4001, 7497, 4002)  # TWS real, Gateway real, TWS simulada, Gateway simulada
+DEFAULT_PORTS = (7496, 4001, 7497, 4002)
+RETRY_AFTER = 15  # segundos sin reintentar la conexión tras un fallo  # TWS real, Gateway real, TWS simulada, Gateway simulada
 PORT_NAMES = {7496: "TWS (real)", 7497: "TWS (simulada)", 4001: "IB Gateway (real)", 4002: "IB Gateway (simulada)"}
 
 # Códigos de IBKR que son solo avisos informativos
@@ -151,6 +152,17 @@ def is_us_stock(contract) -> bool:
     return contract.secType == "STK" and (contract.primaryExchange or contract.exchange) in US_EXCHANGES
 
 
+def since_duration(since: int, interval: str) -> str | None:
+    """Duración IBKR para pedir solo las velas desde `since`; None si el hueco es demasiado
+    grande para una actualización incremental (entonces se pide el rango completo)."""
+    days = int((time.time() - since) // 86400) + 2
+    if interval == "1h":
+        return f"{days} D" if days <= 60 else None
+    if interval == "1d":
+        return f"{days} D" if days <= 365 else None
+    return "1 Y" if days <= 365 else None  # semanal / mensual: un año son pocas velas
+
+
 def _duration(rng: str, interval: str) -> str:
     if rng == "ytd":
         days = (dt.date.today() - dt.date(dt.date.today().year, 1, 1)).days + 1
@@ -172,6 +184,8 @@ class IBKRSource:
         self._errors: list = []
         self._details: dict = {}      # símbolo → (contrato, nombre)
         self._last_search = 0.0
+        self._down_until = 0.0  # tras un fallo de conexión, no reintentar hasta entonces
+        self._down_msg = ""
         self._loop = asyncio.new_event_loop()
         threading.Thread(target=self._loop.run_forever, name="ibkr", daemon=True).start()
         self._lock = asyncio.run_coroutine_threadsafe(self._make_lock(), self._loop).result()
@@ -200,6 +214,8 @@ class IBKRSource:
             raise Unavailable("falta la librería ib_async. Instálala con: pip install ib_async") from None
         if self._ib is not None and self._ib.isConnected():
             return self._ib
+        if time.monotonic() < self._down_until:
+            raise Unavailable(self._down_msg)  # no reintentar en cada petición (en Windows cada intento tarda)
         if self._ib is None:
             self._ib = ib_async.IB()
             self._ib.errorEvent += self._on_error
@@ -218,10 +234,12 @@ class IBKRSource:
                 except Exception:  # p. ej. clientId en uso (error 326): probar con otro
                     self._ib.disconnect()
             tried.append(str(port))
-        raise Unavailable(
+        self._down_msg = (
             f"no se pudo conectar con TWS / IB Gateway en {self.host} (puertos {', '.join(tried)}). "
             "Ábrelo, inicia sesión y activa la API en Configuración global → API → Ajustes → "
             "«Habilitar clientes ActiveX y Socket»")
+        self._down_until = time.monotonic() + RETRY_AFTER
+        raise Unavailable(self._down_msg)
 
     def _error_text(self) -> str:
         return "; ".join(f"[{c}] {t}" for c, t in self._errors[-3:])
@@ -259,9 +277,10 @@ class IBKRSource:
             raise SymbolError(f"IBKR no devolvió datos para {symbol}" + (f": {errors}" if errors else ""))
         return contract, name, [b for b in bars if b.close is not None and b.close > 0]
 
-    async def _chart(self, symbol: str, rng: str, interval: str, rth: bool = True) -> dict:
+    async def _chart(self, symbol: str, rng: str, interval: str, rth: bool = True, since: int | None = None) -> dict:
         rth = rth or interval != "1h"  # el horario extendido solo tiene sentido en velas intradía
-        contract, name, bars = await self._bars(symbol, _duration(rng, interval), BAR_SIZES[interval], rth)
+        duration = (since_duration(since, interval) if since else None) or _duration(rng, interval)
+        contract, name, bars = await self._bars(symbol, duration, BAR_SIZES[interval], rth)
         mark = not rth and is_us_stock(contract)
         out = []
         for b in bars:
@@ -311,8 +330,9 @@ class IBKRSource:
         return results[:10]
 
     # ---- interfaz pública (llamada desde los hilos del servidor) ----
-    def chart(self, symbol: str, rng: str, interval: str, rth: bool = True) -> dict:
-        return self._run(self._chart(symbol, rng, interval, rth))
+    def chart(self, symbol: str, rng: str, interval: str, rth: bool = True, since: int | None = None) -> dict:
+        """Velas del rango pedido; con `since`, solo las posteriores a esa fecha (aprox.)."""
+        return self._run(self._chart(symbol, rng, interval, rth, since))
 
     def extended(self, symbol: str) -> dict | None:
         return self._run(self._extended(symbol))

@@ -4,3 +4,6 @@ __pycache__/
 # favoritos personales (los guarda el servidor)
 watchlist.json
 watchlist.json.*
+
+# caché de datos históricos (la crea el servidor)
+cache.sqlite*

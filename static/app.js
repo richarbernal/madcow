@@ -582,6 +582,8 @@ async function refreshQuotes(only = null) {
   renderWatchlist();
 }
 
+const fmtStamp = (ts) => new Date(ts * 1000).toLocaleString("es-ES",
+  { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
 const fmtPrice = (v) => fmt(v, v >= 10000 ? 0 : v < 1 ? 4 : 2);
 
 function sparkline(vals) {
@@ -633,7 +635,7 @@ function renderWatchlist() {
     const name = ok ? q.name.replace(" (simulado)", "") : "";
     const cls = ["watch-row", sym === S.symbol && "active", sym === S.compare && "cmp"].filter(Boolean).join(" ");
     return `<li class="${cls}" draggable="true" data-sym="${esc(sym)}" title="${esc(name || sym)}">
-      <span class="sym"><b>${esc(sym)}</b><small>${q?.demo ? `<span class="sim" title="Datos simulados">SIM</span>` : ""}${esc(name)}</small></span>
+      <span class="sym"><b>${esc(sym)}</b><small>${q?.demo ? `<span class="sim" title="Datos simulados">SIM</span>` : ""}${q?.stale ? `<span class="sim" title="Sin conexión: datos guardados del ${fmtStamp(q.updated_at)}">CACHÉ</span>` : ""}${esc(name)}</small></span>
       ${cells}
       <span class="actions">
         <button type="button" data-act="cmp" title="Comparar ${esc(S.symbol)} con ${esc(sym)}">vs</button>
@@ -793,11 +795,14 @@ async function load() {
     dataB = b && !b.error ? b : null;
     const msgs = [];
     const offline = a.offlineFallback || b?.offlineFallback;
+    const stale = [a, b].find((x) => x?.stale);
     if (offline) msgs.push(`Sin conexión con los datos reales (${offline}). Se muestran DATOS SIMULADOS.`);
+    else if (stale) msgs.push(`Sin conexión con ${stale.source} (${stale.stale_reason}). ` +
+      `Se muestran los datos guardados (última actualización: ${fmtStamp(stale.updated_at)}).`);
     else if (a.demo) msgs.push("Modo demo: datos simulados, no reales.");
     if (b?.error) msgs.push(`No se pudo cargar ${S.compare}: ${b.error}`);
     banner(msgs.join(" "), b?.error ? "error" : "warn");
-    $("dataSource").textContent = a.demo ? "simulados" : a.source || "—";
+    $("dataSource").textContent = a.demo ? "simulados" : (a.source || "—") + (a.stale ? " (datos guardados)" : "");
     recompute(false);
     loadExt();
   } catch (e) {

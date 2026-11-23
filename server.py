@@ -17,8 +17,13 @@ Uso:
     python3 server.py --watchlist ~/mis-favoritos.json
     python3 server.py --check    # diagnóstico de la conexión con la fuente de datos
     python3 server.py --ib-port 7497   # forzar puerto de TWS/IB Gateway (por defecto se detecta)
+    python3 server.py --clear-cache    # borrar la caché de datos históricos
+
+Los datos históricos se guardan en cache.sqlite: la segunda vez solo se piden las
+velas nuevas y, si TWS está cerrado, se muestran los datos guardados.
 """
 import argparse
+import datetime as dt
 import json
 import math
 import os
@@ -38,6 +43,7 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import ibkr
+from histcache import HistCache
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 YAHOO_CHART = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
@@ -52,6 +58,11 @@ CACHE_TTL = 60  # segundos
 
 SOURCE = None                  # IBKRSource, o None para usar Yahoo Finance
 SOURCE_NAME = "Yahoo Finance"
+SOURCE_KEY = "yahoo"
+BASE_DIR = Path(__file__).resolve().parent
+CACHE = HistCache(None)        # se sustituye en main() por la caché en disco
+RANGE_DAYS = {"1mo": 31, "3mo": 92, "6mo": 183, "1y": 366, "2y": 731, "5y": 1827, "10y": 3653}
+YAHOO_SINCE_RANGES = ((5, "5d"), (31, "1mo"), (92, "3mo"), (183, "6mo"), (366, "1y"), (731, "2y"))
 
 SYMBOL_RE = re.compile(r"^[A-Z0-9.\-^=]{1,20}$")
 WATCHLIST_FILE = Path(__file__).resolve().parent / "watchlist.json"
@@ -142,8 +153,9 @@ def _get_json(url: str) -> dict:
         return json.loads(resp.read().decode("utf-8"))
 
 
-def fetch_yahoo(symbol: str, rng: str, interval: str) -> dict:
-    qs = urllib.parse.urlencode({"range": rng, "interval": interval, "includePrePost": "false", "events": "div,splits"})
+def fetch_yahoo(symbol: str, rng: str, interval: str, rth: bool = True) -> dict:
+    qs = urllib.parse.urlencode({"range": rng, "interval": interval, "events": "div,splits",
+                                 "includePrePost": "false" if rth else "true"})
     data = _get_json(YAHOO_CHART.format(symbol=urllib.parse.quote(symbol)) + "?" + qs)
     chart = data.get("chart", {})
     if chart.get("error"):
@@ -171,26 +183,23 @@ def fetch_yahoo(symbol: str, rng: str, interval: str) -> dict:
     }
 
 
-def get_chart(symbol: str, rng: str, interval: str, rth: bool = True) -> dict:
-    """Datos de la fuente activa con caché corta. Lanza ValueError (símbolo) u OfflineError (conexión).
-    rth=False incluye el pre/post-mercado en las velas intradía (solo con IBKR)."""
-    key = (symbol, rng, interval, rth)
-    hit = _cache.get(key)
-    if hit and time.time() - hit[0] < CACHE_TTL:
-        return hit[1]
+def fetch_source(symbol: str, rng: str, interval: str, rth: bool, since: int | None = None) -> dict:
+    """Pide velas a la fuente activa, sin caché. Con `since`, solo las recientes.
+    Lanza ValueError (símbolo) u OfflineError (sin conexión con la fuente)."""
     if SOURCE is not None:
         try:
-            data = SOURCE.chart(symbol, rng, interval, rth)
+            return SOURCE.chart(symbol, rng, interval, rth, since)
         except ibkr.Unavailable as e:
             log_error(symbol, str(e))
             raise OfflineError(str(e)) from e
         except ibkr.SymbolError as e:
             log_error(symbol, str(e))
             raise
-        _cache[key] = (time.time(), data)
-        return data
+    if since:
+        days = (time.time() - since) // 86400 + 2
+        rng = next((r for d, r in YAHOO_SINCE_RANGES if days <= d), rng)
     try:
-        data = fetch_yahoo(symbol, rng, interval)
+        return fetch_yahoo(symbol, rng, interval, rth)
     except urllib.error.HTTPError as e:
         if e.code in (400, 404):
             raise ValueError(f"Símbolo no encontrado: {symbol}") from e
@@ -203,8 +212,69 @@ def get_chart(symbol: str, rng: str, interval: str, rth: bool = True) -> dict:
         msg = describe_error(e)
         log_error(symbol, msg)
         raise OfflineError(msg) from e
-    _cache[key] = (time.time(), data)
-    return data
+
+
+def range_start(rng: str, now: float) -> int:
+    if rng == "max":
+        return 0
+    if rng == "ytd":
+        year = dt.datetime.fromtimestamp(now, dt.timezone.utc).year
+        return int(dt.datetime(year, 1, 1, tzinfo=dt.timezone.utc).timestamp())
+    return int(now - RANGE_DAYS[rng] * 86400)
+
+
+def _from_cache(key: tuple, meta: dict, start: int) -> dict:
+    return {"symbol": key[1], "name": meta["name"], "currency": meta["currency"],
+            "exchange": meta["exchange"], "bars": CACHE.bars(key, start), "demo": False,
+            "updated_at": meta["updated_at"]}
+
+
+def _update_incremental(key: tuple, symbol: str, rng: str, interval: str, rth: bool, meta: dict, start: int):
+    """Pide solo las velas nuevas y las añade a la caché. Si las velas que se solapan no
+    coinciden con las guardadas (split, ajuste…), descarta la serie y la descarga entera."""
+    tail = CACHE.last_bars(key, 4)
+    data = fetch_source(symbol, rng, interval, rth, since=tail[0]["time"] if tail else start)
+    fresh = {b["time"]: b["close"] for b in data["bars"]}
+    for b in tail[:-1]:  # la última vela guardada puede estar incompleta: no se compara
+        c = fresh.get(b["time"])
+        if c is not None and abs(c / b["close"] - 1) > 0.02:
+            print(f"[{time.strftime('%H:%M:%S')}] {symbol}: el histórico guardado no coincide "
+                  "con el de la fuente (¿split o ajuste?); se vuelve a descargar.", flush=True)
+            full = fetch_source(symbol, rng, interval, rth)
+            CACHE.invalidate(key)
+            CACHE.save(key, full, start)
+            return
+    CACHE.save(key, data, meta["covered_from"])
+
+
+def get_chart(symbol: str, rng: str, interval: str, rth: bool = True) -> dict:
+    """Velas del rango pedido, usando la caché en disco.
+
+    - Si la caché cubre el rango y es reciente (CACHE_TTL), no se consulta la fuente.
+    - Si cubre el rango pero está anticuada, se piden solo las velas nuevas.
+    - Si no lo cubre, se pide el rango completo.
+    - Sin conexión con la fuente, se devuelven los datos guardados con "stale": true.
+    rth=False incluye el pre/post-mercado en las velas de 1 hora.
+    """
+    rth = rth or interval != "1h"
+    key = (SOURCE_KEY, symbol, interval, int(rth))
+    now = time.time()
+    start = range_start(rng, now)
+    meta = CACHE.series(key)
+    covered = meta is not None and meta["covered_from"] <= start
+    if covered and now - meta["updated_at"] < CACHE_TTL:
+        return _from_cache(key, meta, start)
+    try:
+        if covered:
+            _update_incremental(key, symbol, rng, interval, rth, meta, start)
+        else:
+            data = fetch_source(symbol, rng, interval, rth)
+            CACHE.save(key, data, start if meta is None else min(start, meta["covered_from"]), now)
+    except OfflineError as e:
+        if meta:
+            return {**_from_cache(key, meta, start), "stale": True, "stale_reason": str(e)}
+        raise
+    return _from_cache(key, CACHE.series(key), start)
 
 
 def get_extended(symbol: str):
@@ -346,7 +416,9 @@ class Handler(SimpleHTTPRequestHandler):
             bars = d["bars"]
             out = {"symbol": sym, "name": d["name"], "currency": d["currency"], "demo": d["demo"],
                    "time": bars[-1]["time"], "closes": [round(b["close"], 6) for b in bars]}
-            ext = get_extended(sym) if want_ext and not d["demo"] else None
+            if d.get("stale"):
+                out.update(stale=True, updated_at=d["updated_at"])
+            ext = get_extended(sym) if want_ext and not d["demo"] and not d.get("stale") else None
             if ext and ext["session"] != "regular":
                 # Referencia: último cierre del horario regular (hoy en post-mercado, ayer en pre-mercado)
                 out["ext"] = {**ext, "change": ext["price"] / bars[-1]["close"] - 1}
@@ -426,7 +498,7 @@ def _report_connection():
 
 
 def main():
-    global WATCHLIST_FILE, SOURCE, SOURCE_NAME, CACHE_TTL
+    global WATCHLIST_FILE, SOURCE, SOURCE_NAME, SOURCE_KEY, CACHE_TTL, CACHE
     ap = argparse.ArgumentParser(description="MadCow Charts")
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8000)
@@ -439,10 +511,22 @@ def main():
                     help="puerto de la API (por defecto prueba 7496, 4001, 7497 y 4002)")
     ap.add_argument("--ib-client-id", type=int, default=117, help="clientId para la API de IBKR")
     ap.add_argument("--check", action="store_true", help="diagnosticar la conexión con la fuente de datos y salir")
+    ap.add_argument("--cache", type=Path, default=BASE_DIR / "cache.sqlite",
+                    help="archivo de la caché de datos históricos (por defecto cache.sqlite)")
+    ap.add_argument("--no-cache", action="store_true", help="no guardar datos históricos en disco")
+    ap.add_argument("--clear-cache", action="store_true", help="borrar la caché de datos históricos y salir")
     args = ap.parse_args()
+    cache_path = args.cache.expanduser().resolve()
+    if args.clear_cache:
+        removed = [p for p in (cache_path, Path(f"{cache_path}-wal"), Path(f"{cache_path}-shm")) if p.exists()]
+        for p in removed:
+            p.unlink()
+        print(f"Caché borrada: {cache_path}" if removed else f"No había caché en {cache_path}")
+        sys.exit(0)
     if args.source == "ibkr":
         SOURCE = ibkr.IBKRSource(args.ib_host, args.ib_port, args.ib_client_id)
         SOURCE_NAME = ibkr.IBKRSource.name
+        SOURCE_KEY = "ibkr"
         CACHE_TTL = 120
     if args.check:
         sys.exit(run_check())
@@ -451,6 +535,12 @@ def main():
     print(f"MadCow Charts en http://{args.host}:{args.port}  (Ctrl+C para salir)")
     print(f"Watchlist: {WATCHLIST_FILE}")
     print(f"Datos: {SOURCE_NAME}")
+    if args.no_cache:
+        print("Caché de históricos: desactivada (solo en memoria)")
+    else:
+        CACHE = HistCache(cache_path)
+        n_series, n_bars = CACHE.stats()
+        print(f"Caché de históricos: {cache_path} ({n_series} series, {n_bars} velas)")
     if SOURCE is not None:
         threading.Thread(target=_report_connection, daemon=True).start()
     try:
