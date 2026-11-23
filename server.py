@@ -494,7 +494,7 @@ def _report_connection():
         print(f"Conectado a {ibkr.PORT_NAMES.get(SOURCE.connected_port, 'IBKR')} "
               f"en el puerto {SOURCE.connected_port}", flush=True)
     except ibkr.Unavailable as e:
-        print(f"Aviso: {e}. La app mostrará datos simulados hasta que esté disponible.", flush=True)
+        print(f"Aviso: {e}. Hasta que esté disponible se mostrarán los datos guardados (o simulados si no los hay).", flush=True)
 
 
 def main():
