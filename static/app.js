@@ -19,6 +19,7 @@ const DEFAULTS = {
   cmpMode: "perf",
   sideTab: "watch",
   vol: true,
+  ext: true, // pre/post-mercado (acciones de EE. UU.)
   bb: { on: true, period: 20, mult: 2, color: "#7e57c2" },
   rsi: { on: true, period: 14, high: 70, low: 30 },
   mas: [
@@ -88,6 +89,7 @@ let indA = null;  // indicadores calculados para A
 async function fetchSeries(symbol) {
   const q = new URLSearchParams({ symbol, range: S.range, interval: S.interval });
   if (S.demo) q.set("demo", "1");
+  if (S.ext && S.interval === "1h") q.set("rth", "0");
   let res = await fetch("/api/chart?" + q);
   let body = await res.json().catch(() => ({}));
   if (!res.ok && body.offline && !S.demo) {
@@ -177,7 +179,7 @@ function renderPrice(keepRange = true) {
     priceChart.priceScale("vol").applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
     vs.setData(bars.map((b) => ({
       time: b.time, value: b.volume,
-      color: (b.close >= b.open ? up : down) + "55",
+      color: (b.close >= b.open ? up : down) + (b.ext ? "22" : "55"),
     })));
     priceSeries.push(vs);
   }
@@ -212,7 +214,12 @@ function renderPrice(keepRange = true) {
     mainSeries = priceChart.addCandlestickSeries({
       upColor: up, downColor: down, borderUpColor: up, borderDownColor: down, wickUpColor: up, wickDownColor: down,
     });
-    mainSeries.setData(bars);
+    // Velas de pre/post-mercado atenuadas, como en TradingView
+    mainSeries.setData(bars.map((b) => {
+      if (!b.ext) return b;
+      const c = (b.close >= b.open ? up : down) + "66";
+      return { ...b, color: c, borderColor: c, wickColor: c };
+    }));
   }
   priceSeries.push(mainSeries);
   priceChart.priceScale("right").applyOptions({ scaleMargins: { top: 0.08, bottom: S.vol ? 0.2 : 0.06 } });
@@ -259,7 +266,7 @@ function updateLegend(idx) {
   const b = bars[i];
   if (!b) return;
   const cls = b.close >= b.open ? "up" : "down";
-  let html = `<span class="item"><b>${esc(dataA.symbol)}</b> <span class="muted">${fmtDate(b.time)}</span></span>`;
+  let html = `<span class="item"><b>${esc(dataA.symbol)}</b> <span class="muted">${fmtDate(b.time)}${b.ext ? " · fuera de horario" : ""}</span></span>`;
   html += `<span class="item ${cls}">A ${fmt(b.open)} M ${fmt(b.high)} m ${fmt(b.low)} C ${fmt(b.close)}</span>`;
   if (S.vol) html += legendItem(null, "Vol", fmtVol(b.volume));
   if (S.bb.on) {
@@ -565,6 +572,7 @@ async function refreshQuotes(only = null) {
   try {
     const q = new URLSearchParams({ symbols: syms.join(",") });
     if (S.demo) q.set("demo", "1");
+    if (S.ext) q.set("ext", "1");
     const res = await fetch("/api/quotes?" + q);
     const body = await res.json();
     if (token !== quotesToken) return; // llegó una petición más reciente
@@ -613,9 +621,13 @@ function renderWatchlist() {
       const c = q.closes, last = c.at(-1), prev = c.at(-2) ?? last, chg = last / prev - 1;
       const r = rsi(c, S.rsi.period).at(-1);
       const rc = r == null ? "" : r >= S.rsi.high ? "down" : r <= S.rsi.low ? "up" : "";
+      const e = S.ext ? q.ext : null;
+      const [icon, label] = e ? EXT_LABELS[e.session] || EXT_LABELS.post : [];
+      const extPrice = e ? `<small class="ext" title="${label} · ${fmtExtTime(e.time)}">${icon} ${fmtPrice(e.price)}</small>` : "";
+      const extChg = e ? `<small class="ext ${e.change >= 0 ? "up" : "down"}">${pct(e.change)}</small>` : "";
       cells = sparkline(c.slice(-30)) +
-        `<span class="num">${fmtPrice(last)}</span>` +
-        `<span class="num ${chg >= 0 ? "up" : "down"}">${pct(chg)}</span>` +
+        `<span class="num">${fmtPrice(last)}${extPrice}</span>` +
+        `<span class="num ${chg >= 0 ? "up" : "down"}">${pct(chg)}${extChg}</span>` +
         `<span class="num ${rc}" title="RSI(${S.rsi.period})">${fmt(r, 0)}</span>`;
     }
     const name = ok ? q.name.replace(" (simulado)", "") : "";
@@ -698,10 +710,46 @@ function renderWatchlist() {
   });
 
   // Refresco automático cada minuto mientras la pestaña esté visible
-  setInterval(() => { if (document.visibilityState === "visible") refreshQuotes(); }, 60_000);
+  setInterval(() => { if (document.visibilityState === "visible") { refreshQuotes(); loadExt(); } }, 60_000);
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "visible" && (!WL.updated || Date.now() - WL.updated > 60_000)) refreshQuotes();
   });
+}
+
+// ---------------------------------------------------------------------------
+// Pre/post-mercado del símbolo principal (solo acciones de EE. UU. con IBKR)
+// ---------------------------------------------------------------------------
+const EXT_LABELS = { pre: ["☀", "Pre-mercado"], post: ["☾", "Post-mercado"], overnight: ["☾", "Nocturno"] };
+let extA = null;
+
+function fmtExtTime(ts) {
+  const d = new Date(ts * 1000);
+  const hm = d.toLocaleTimeString("es-ES", { hour: "2-digit", minute: "2-digit" });
+  return d.toDateString() === new Date().toDateString() ? hm : d.toLocaleDateString("es-ES", { weekday: "short" }) + " " + hm;
+}
+
+function renderExt() {
+  const el = $("qExt");
+  if (!extA || !S.ext || !dataA) { el.hidden = true; return; }
+  const [icon, label] = EXT_LABELS[extA.session] || EXT_LABELS.post;
+  el.hidden = false;
+  el.innerHTML = `${icon} ${label}: <b>${fmtPrice(extA.price)} ${esc(dataA.currency || "")}</b> ` +
+    `<span class="${extA.change >= 0 ? "up" : "down"}">${pct(extA.change)}</span> ` +
+    `<span class="muted" title="Hora de la última vela de 5 minutos">· ${fmtExtTime(extA.time)}</span>`;
+}
+
+async function loadExt() {
+  const sym = S.symbol;
+  let ext = null;
+  if (S.ext && !S.demo && dataA && !dataA.demo) {
+    try {
+      const res = await fetch("/api/quotes?" + new URLSearchParams({ symbols: sym, ext: "1" }));
+      ext = (await res.json()).quotes?.[0]?.ext || null;
+    } catch { /* se reintenta en el siguiente ciclo */ }
+  }
+  if (sym !== S.symbol) return; // el usuario ya cambió de símbolo
+  extA = ext;
+  renderExt();
 }
 
 // ---------------------------------------------------------------------------
@@ -731,6 +779,7 @@ async function load() {
   save();
   syncControls();
   renderWatchlist();
+  if (dataA && dataA.symbol !== S.symbol) { extA = null; renderExt(); }
   document.body.classList.add("loading");
   const applyTheme = chartTheme();
   for (const c of [priceChart, rsiChart, cmpChart]) c.applyOptions(applyTheme);
@@ -750,6 +799,7 @@ async function load() {
     banner(msgs.join(" "), b?.error ? "error" : "warn");
     $("dataSource").textContent = a.demo ? "simulados" : a.source || "—";
     recompute(false);
+    loadExt();
   } catch (e) {
     if (token !== loadToken) return;
     banner(`No se pudo cargar ${S.symbol}: ${e.message}`, "error");
@@ -771,6 +821,7 @@ function syncControls() {
   $("bbOn").checked = S.bb.on; $("bbPeriod").value = S.bb.period; $("bbMult").value = S.bb.mult; $("bbColor").value = S.bb.color;
   $("rsiOn").checked = S.rsi.on; $("rsiPeriod").value = S.rsi.period; $("rsiHigh").value = S.rsi.high; $("rsiLow").value = S.rsi.low;
   $("volOn").checked = S.vol;
+  $("extOn").checked = S.ext;
   renderMaList();
 }
 
@@ -822,6 +873,11 @@ bindSetting("rsiPeriod", (t) => (S.rsi.period = clampInt(t.value, 2, 100, 14)));
 bindSetting("rsiHigh", (t) => (S.rsi.high = clampInt(t.value, 50, 100, 70)));
 bindSetting("rsiLow", (t) => (S.rsi.low = clampInt(t.value, 0, 50, 30)));
 bindSetting("volOn", (t) => (S.vol = t.checked));
+$("extOn").addEventListener("change", (e) => {
+  S.ext = e.target.checked;
+  refreshQuotes();
+  load(); // vuelve a pedir las velas de 1 hora con o sin horario extendido
+});
 
 $("rangeSeg").addEventListener("click", (e) => {
   const r = e.target.dataset.range;

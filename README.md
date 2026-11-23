@@ -78,6 +78,10 @@ a menudo las peticiones automáticas (error 429).
     cambiar la ubicación con `python3 server.py --watchlist ~/favoritos.json`
     (por ejemplo, a una carpeta sincronizada en la nube). No se sube a git.
 
+- **Pre/post-mercado** (acciones de EE. UU.): precio fuera de horario junto a la cotización
+  y en favoritos (☀ pre-mercado, ☾ post-mercado), con su variación sobre el último cierre.
+  En el intervalo de 1 hora se añaden las velas extendidas, atenuadas. Se activa/desactiva
+  en la pestaña Indicadores. Las bolsas europeas no tienen sesión extendida.
 - **Gráfico de precio**: velas o línea, volumen, rangos 1M → Máx, intervalos 1h / diario / semanal / mensual.
 - **Bandas de Bollinger**: periodo, nº de desviaciones y color configurables.
 - **Medias móviles**: tantas como quieras, SMA o EMA, periodo en sesiones (por defecto 20, 50 y 200).

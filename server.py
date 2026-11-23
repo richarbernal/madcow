@@ -171,15 +171,16 @@ def fetch_yahoo(symbol: str, rng: str, interval: str) -> dict:
     }
 
 
-def get_chart(symbol: str, rng: str, interval: str) -> dict:
-    """Datos de la fuente activa con caché corta. Lanza ValueError (símbolo) u OfflineError (conexión)."""
-    key = (symbol, rng, interval)
+def get_chart(symbol: str, rng: str, interval: str, rth: bool = True) -> dict:
+    """Datos de la fuente activa con caché corta. Lanza ValueError (símbolo) u OfflineError (conexión).
+    rth=False incluye el pre/post-mercado en las velas intradía (solo con IBKR)."""
+    key = (symbol, rng, interval, rth)
     hit = _cache.get(key)
     if hit and time.time() - hit[0] < CACHE_TTL:
         return hit[1]
     if SOURCE is not None:
         try:
-            data = SOURCE.chart(symbol, rng, interval)
+            data = SOURCE.chart(symbol, rng, interval, rth)
         except ibkr.Unavailable as e:
             log_error(symbol, str(e))
             raise OfflineError(str(e)) from e
@@ -202,6 +203,22 @@ def get_chart(symbol: str, rng: str, interval: str) -> dict:
         msg = describe_error(e)
         log_error(symbol, msg)
         raise OfflineError(msg) from e
+    _cache[key] = (time.time(), data)
+    return data
+
+
+def get_extended(symbol: str):
+    """Precio de pre/post-mercado (o None). Nunca lanza: es información accesoria."""
+    if SOURCE is None:
+        return None
+    key = (symbol, "ext")
+    hit = _cache.get(key)
+    if hit and time.time() - hit[0] < 60:
+        return hit[1]
+    try:
+        data = SOURCE.extended(symbol)
+    except Exception:
+        data = None
     _cache[key] = (time.time(), data)
     return data
 
@@ -303,8 +320,9 @@ class Handler(SimpleHTTPRequestHandler):
         if p.get("demo") == "1":
             return self._send_json({**demo_series(symbol, rng, interval), "source": "datos simulados"})
 
+        rth = p.get("rth") != "0"
         try:
-            return self._send_json({**get_chart(symbol, rng, interval), "source": SOURCE_NAME})
+            return self._send_json({**get_chart(symbol, rng, interval, rth), "source": SOURCE_NAME})
         except ValueError as e:
             return self._send_json({"error": str(e), "source": SOURCE_NAME}, 404)
         except OfflineError as e:
@@ -314,6 +332,7 @@ class Handler(SimpleHTTPRequestHandler):
         """Resumen de varios símbolos para la watchlist: últimos ~3 meses de cierres diarios."""
         symbols = [s.strip().upper() for s in p.get("symbols", "").split(",") if s.strip()][:MAX_WATCHLIST]
         demo = p.get("demo") == "1"
+        want_ext = p.get("ext") == "1"
 
         def one(sym: str) -> dict:
             if not SYMBOL_RE.match(sym):
@@ -325,8 +344,13 @@ class Handler(SimpleHTTPRequestHandler):
             except OfflineError:
                 d = demo_series(sym, "3mo", "1d")  # sin conexión: simulado, marcado como demo
             bars = d["bars"]
-            return {"symbol": sym, "name": d["name"], "currency": d["currency"], "demo": d["demo"],
-                    "time": bars[-1]["time"], "closes": [round(b["close"], 6) for b in bars]}
+            out = {"symbol": sym, "name": d["name"], "currency": d["currency"], "demo": d["demo"],
+                   "time": bars[-1]["time"], "closes": [round(b["close"], 6) for b in bars]}
+            ext = get_extended(sym) if want_ext and not d["demo"] else None
+            if ext and ext["session"] != "regular":
+                # Referencia: último cierre del horario regular (hoy en post-mercado, ayer en pre-mercado)
+                out["ext"] = {**ext, "change": ext["price"] / bars[-1]["close"] - 1}
+            return out
 
         with ThreadPoolExecutor(max_workers=8) as ex:
             results = list(ex.map(one, symbols))

@@ -121,6 +121,36 @@ def _timestamp(d) -> int:
     return int(dt.datetime(d.year, d.month, d.day, tzinfo=dt.timezone.utc).timestamp())
 
 
+def _ny_offset(t: dt.datetime) -> dt.timedelta:
+    """Desfase UTC de Nueva York (horario de verano de EE. UU.), sin depender de tzdata."""
+    y = t.year
+    mar1, nov1 = dt.date(y, 3, 1), dt.date(y, 11, 1)
+    dst_start = mar1 + dt.timedelta(days=(6 - mar1.weekday()) % 7 + 7)   # 2.º domingo de marzo
+    dst_end = nov1 + dt.timedelta(days=(6 - nov1.weekday()) % 7)         # 1.er domingo de noviembre
+    start = dt.datetime.combine(dst_start, dt.time(7), dt.timezone.utc)  # 2:00 EST
+    end = dt.datetime.combine(dst_end, dt.time(6), dt.timezone.utc)      # 2:00 EDT
+    return dt.timedelta(hours=-4 if start <= t < end else -5)
+
+
+def us_session(ts: int) -> str:
+    """Sesión de EE. UU. de una vela según su hora de inicio: pre, regular, post u overnight."""
+    t = dt.datetime.fromtimestamp(ts, dt.timezone.utc)
+    ny = t + _ny_offset(t)
+    m = ny.hour * 60 + ny.minute
+    if ny.weekday() < 5:
+        if 4 * 60 <= m < 9 * 60 + 30:
+            return "pre"
+        if 9 * 60 + 30 <= m < 16 * 60:
+            return "regular"
+        if 16 * 60 <= m < 20 * 60:
+            return "post"
+    return "overnight"
+
+
+def is_us_stock(contract) -> bool:
+    return contract.secType == "STK" and (contract.primaryExchange or contract.exchange) in US_EXCHANGES
+
+
 def _duration(rng: str, interval: str) -> str:
     if rng == "ytd":
         days = (dt.date.today() - dt.date(dt.date.today().year, 1, 1)).days + 1
@@ -212,15 +242,14 @@ class IBKRSource:
                 return hit
         raise SymbolError(f"IBKR no reconoce el símbolo {symbol}")
 
-    async def _chart(self, symbol: str, rng: str, interval: str) -> dict:
+    async def _bars(self, symbol: str, duration: str, bar_size: str, rth: bool):
         async with self._lock:
             ib = await self._connect()
             contract, name = await self._resolve(ib, symbol)
             self._errors.clear()
             bars = await ib.reqHistoricalDataAsync(
-                contract, endDateTime="", durationStr=_duration(rng, interval),
-                barSizeSetting=BAR_SIZES[interval], whatToShow="TRADES",
-                useRTH=True, formatDate=2, timeout=45)
+                contract, endDateTime="", durationStr=duration, barSizeSetting=bar_size,
+                whatToShow="TRADES", useRTH=rth, formatDate=2, timeout=45)
             errors = self._error_text()
             if not ib.isConnected():
                 raise Unavailable("se perdió la conexión con TWS / IB Gateway")
@@ -228,12 +257,19 @@ class IBKRSource:
             if "permission" in errors.lower() or "subscription" in errors.lower():
                 raise SymbolError(f"tu cuenta de IBKR no tiene permisos de datos de mercado para {symbol} ({errors})")
             raise SymbolError(f"IBKR no devolvió datos para {symbol}" + (f": {errors}" if errors else ""))
+        return contract, name, [b for b in bars if b.close is not None and b.close > 0]
+
+    async def _chart(self, symbol: str, rng: str, interval: str, rth: bool = True) -> dict:
+        rth = rth or interval != "1h"  # el horario extendido solo tiene sentido en velas intradía
+        contract, name, bars = await self._bars(symbol, _duration(rng, interval), BAR_SIZES[interval], rth)
+        mark = not rth and is_us_stock(contract)
         out = []
         for b in bars:
-            if b.close is None or b.close <= 0:
-                continue
-            out.append({"time": _timestamp(b.date), "open": b.open, "high": b.high, "low": b.low,
-                        "close": b.close, "volume": max(0, int(b.volume or 0))})
+            bar = {"time": _timestamp(b.date), "open": b.open, "high": b.high, "low": b.low,
+                   "close": b.close, "volume": max(0, int(b.volume or 0))}
+            if mark and us_session(bar["time"]) != "regular":
+                bar["ext"] = True
+            out.append(bar)
         return {
             "symbol": symbol,
             "name": name,
@@ -242,6 +278,20 @@ class IBKRSource:
             "bars": out,
             "demo": False,
         }
+
+    async def _extended(self, symbol: str) -> dict | None:
+        """Último precio de pre/post-mercado (solo acciones de EE. UU.), o None si no aplica."""
+        async with self._lock:
+            ib = await self._connect()
+            contract, _ = await self._resolve(ib, symbol)
+        if not is_us_stock(contract):
+            return None
+        _, _, bars = await self._bars(symbol, "3 D", "5 mins", rth=False)
+        if not bars:
+            return None
+        last = bars[-1]
+        ts = _timestamp(last.date)
+        return {"session": us_session(ts), "price": last.close, "time": ts}
 
     async def _search(self, query: str) -> list:
         async with self._lock:
@@ -261,8 +311,11 @@ class IBKRSource:
         return results[:10]
 
     # ---- interfaz pública (llamada desde los hilos del servidor) ----
-    def chart(self, symbol: str, rng: str, interval: str) -> dict:
-        return self._run(self._chart(symbol, rng, interval))
+    def chart(self, symbol: str, rng: str, interval: str, rth: bool = True) -> dict:
+        return self._run(self._chart(symbol, rng, interval, rth))
+
+    def extended(self, symbol: str) -> dict | None:
+        return self._run(self._extended(symbol))
 
     def search(self, query: str) -> list:
         return self._run(self._search(query), timeout=30)

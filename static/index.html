@@ -67,7 +67,7 @@
           <button type="button" id="starBtn" class="star" title="Añadir a favoritos" aria-pressed="false">☆</button>
           <span id="qSymbol">—</span><span id="qName" class="muted"></span>
         </div>
-        <div class="q-price"><span id="qLast">—</span> <span id="qChange"></span></div>
+        <div class="q-price"><span id="qLast">—</span> <span id="qChange"></span><div class="q-ext" id="qExt" hidden></div></div>
       </div>
 
       <div class="pane pane-price">
@@ -156,6 +156,15 @@
       <section class="panel">
         <h3>Volumen</h3>
         <div class="row"><label>Mostrar volumen</label><label class="switch"><input type="checkbox" id="volOn"><span></span></label></div>
+      </section>
+
+      <section class="panel">
+        <h3>
+          <label class="switch"><input type="checkbox" id="extOn"><span></span></label>
+          Pre/post-mercado
+        </h3>
+        <p class="muted small panel-note">Solo acciones de EE. UU. Muestra el precio fuera de horario junto a la
+          cotización y en favoritos, y en el intervalo de 1 hora añade las velas de pre y post-mercado (atenuadas).</p>
       </section>
       </div>
 
