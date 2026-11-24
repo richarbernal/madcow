@@ -125,6 +125,15 @@ a menudo las peticiones automáticas (error 429).
     cambiar la ubicación con `python3 server.py --watchlist ~/favoritos.json`
     (por ejemplo, a una carpeta sincronizada en la nube). No se sube a git.
 
+- **Gráfico en vivo**: cada 30 s se actualizan la vela en curso, el volumen y los indicadores
+  (punto verde junto al precio). Solo se piden a IBKR las velas recientes; si estás al final
+  del gráfico, se desplaza solo al abrirse una vela nueva. Si se pierde la conexión el punto
+  se pone gris, y al volver TWS el gráfico se recupera sin recargar la página.
+- **Escáner de señales** (botón «Escáner»): tabla ordenable de tus favoritos y tu cartera
+  con RSI, %B y ancho de Bollinger, distancia a cada media, último cruce entre la media más
+  corta y la más larga, P&G latente y señales (sobreventa/sobrecompra, fuera de bandas,
+  cruce reciente). Usa velas diarias y tus ajustes de indicadores; filtro «solo con señal»
+  y clic en una fila para abrir su gráfico.
 - **Pre/post-mercado** (acciones de EE. UU.): precio fuera de horario junto a la cotización
   y en favoritos (☀ pre-mercado, ☾ post-mercado), con su variación sobre el último cierre,
   y marcado en el gráfico con una línea y etiqueta en el eje (naranja en pre-mercado,
@@ -145,6 +154,23 @@ a menudo las peticiones automáticas (error 429).
 
 Símbolos de Yahoo: `AAPL`, `MSFT`, `SAN.MC` (Mercado Continuo), `ITX.MC`, `^IBEX`, `^GSPC`, `BTC-USD`…
 
+## Tests
+
+Los tests no necesitan TWS ni conexión: usan un **TWS simulado** (`tests/fake_tws.py`) que
+imita la librería de la API, incluidos sus errores reales (puerto cerrado, clientId en uso,
+símbolo desconocido, falta de permisos de datos).
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest
+```
+
+Cubren la traducción de símbolos, las sesiones de EE. UU. con el horario de verano, la
+conexión con IBKR, la caché (descarga incremental, splits, TWS cerrado), pre/post-mercado,
+la cartera, los endpoints HTTP y la seguridad (cabecera Host, contraseña, privacidad de la
+cartera). Si tienes **Node.js**, también se prueban los indicadores (`npm test`, o
+automáticamente desde pytest); entre ellos, el RSI con el ejemplo clásico de Wilder.
+
 ## Estructura
 
 ```
@@ -157,6 +183,7 @@ static/index.html      interfaz
 static/app.js          lógica de gráficos, comparación y controles
 static/indicators.js   SMA, EMA, Bollinger, RSI y estadísticas
 static/vendor/         TradingView Lightweight Charts 4.1.3 (Apache 2.0)
+tests/                 tests (pytest) y TWS simulado; tests/js/ para los indicadores (Node)
 ```
 
 > Datos con posible retraso. Herramienta de análisis, no asesoramiento financiero.

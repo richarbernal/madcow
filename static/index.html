@@ -62,12 +62,20 @@
 
   <main class="layout">
     <section class="charts">
+      <div class="view-bar">
+        <div class="seg" id="viewSeg" role="tablist" aria-label="Vista">
+          <button type="button" role="tab" data-view="chart">Gráfico</button>
+          <button type="button" role="tab" data-view="scan">Escáner</button>
+        </div>
+      </div>
+
+      <div id="chartView" class="view">
       <div class="quote" id="quote">
         <div class="q-title">
           <button type="button" id="starBtn" class="star" title="Añadir a favoritos" aria-pressed="false">☆</button>
           <span id="qSymbol">—</span><span id="qName" class="muted"></span>
         </div>
-        <div class="q-price"><span id="qLast">—</span> <span id="qChange"></span><div class="q-ext" id="qExt" hidden></div><div class="q-ext" id="qPos" hidden></div></div>
+        <div class="q-price"><span id="liveDot" class="live-dot" hidden></span><span id="qLast">—</span> <span id="qChange"></span><div class="q-ext" id="qExt" hidden></div><div class="q-ext" id="qPos" hidden></div></div>
       </div>
 
       <div class="pane pane-price">
@@ -95,6 +103,24 @@
         <div class="table-wrap">
           <table class="stats" id="statsTable"></table>
         </div>
+      </div>
+      </div>
+
+      <div id="scanView" class="view" hidden>
+        <div class="scan-head">
+          <h2>Escáner de señales <span class="muted small">· velas diarias, con tus ajustes de indicadores</span></h2>
+          <div class="scan-filters">
+            <label class="chk"><input type="checkbox" id="scanWatch"> ★ Favoritos</label>
+            <label class="chk"><input type="checkbox" id="scanPos"> Cartera</label>
+            <label class="chk"><input type="checkbox" id="scanOnly"> Solo con señal</label>
+            <button type="button" id="scanRefresh" class="link-btn">↻ Actualizar</button>
+          </div>
+        </div>
+        <p class="muted small scan-summary" id="scanSummary"></p>
+        <div class="table-wrap scan-wrap">
+          <table class="scan" id="scanTable"></table>
+        </div>
+        <p class="muted small" id="scanMsg" hidden></p>
       </div>
     </section>
 

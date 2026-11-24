@@ -432,6 +432,16 @@ class IBKRSource:
             "time": int(time.time()),
         }
 
+    def close(self) -> None:
+        """Cierra la conexión y detiene el hilo de ib_async."""
+        async def _close():
+            if self._ib is not None:
+                self._ib.disconnect()
+        try:
+            self._run(_close(), timeout=5)
+        finally:
+            self._loop.call_soon_threadsafe(self._loop.stop)
+
     def positions(self) -> dict:
         return self._run(self._positions(), timeout=60)
 
