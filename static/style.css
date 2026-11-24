@@ -277,3 +277,40 @@ input[type="color"] { width: 32px; height: 24px; border: 1px solid var(--border)
 .pos-row .num small.down { color: var(--down); }
 .pos-row .kind { font-size: 9px; font-weight: 700; color: var(--muted); border: 1px solid var(--border); border-radius: 3px; padding: 0 3px; margin-left: 4px; }
 .pos-msg { padding: 10px 6px; margin: 0; }
+
+/* ---------- Indicador «en directo» ---------- */
+.live-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 8px; vertical-align: middle; }
+.live-dot.on { background: var(--up); animation: live-pulse 2s ease-in-out infinite; }
+.live-dot.paused { background: var(--muted); }
+@keyframes live-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+@media (prefers-reduced-motion: reduce) { .live-dot.on { animation: none; } }
+
+/* ---------- Vistas: gráfico / escáner ---------- */
+.view-bar { display: flex; justify-content: flex-start; }
+.view { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+
+/* ---------- Escáner de señales ---------- */
+.scan-head { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; }
+.scan-head h2 { margin: 0; font-size: 16px; }
+.scan-filters { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }
+.chk { display: inline-flex; gap: 5px; align-items: center; cursor: pointer; color: var(--muted); }
+.scan-summary { margin: 0; }
+.scan-wrap { border: 1px solid var(--border); border-radius: 8px; }
+.scan { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; font-size: 13px; }
+.scan th, .scan td { padding: 7px 8px; border-bottom: 1px solid var(--border); text-align: right; white-space: nowrap; }
+.scan th { font-weight: 600; color: var(--muted); font-size: 12px; cursor: pointer; user-select: none; background: var(--panel); position: sticky; top: 0; }
+.scan th:hover { color: var(--text); }
+.scan th.sorted { color: var(--text); }
+.scan th:first-child, .scan td:first-child { text-align: left; position: sticky; left: 0; background: var(--bg); z-index: 1; }
+.scan th:first-child { background: var(--panel); z-index: 2; }
+.scan th:last-child, .scan td:last-child { text-align: left; }
+.scan td:last-child { white-space: normal; min-width: 104px; }
+.scan td:last-child .tag { display: inline-block; margin: 1px 4px 1px 0; }
+.scan tbody tr { cursor: pointer; }
+.scan tbody tr:hover td { background: var(--panel-2); }
+.scan td small { display: block; color: var(--muted); font-size: 11px; max-width: 150px; overflow: hidden; text-overflow: ellipsis; }
+.scan .src { font-size: 10px; margin-left: 4px; }
+.scan .src.fav { color: #f5b301; }
+.scan .src.pos { color: var(--muted); border: 1px solid var(--border); border-radius: 3px; padding: 0 3px; font-weight: 600; }
+.scan .tag { margin-right: 4px; }
+.scan .err td { color: var(--muted); cursor: default; }

@@ -59,6 +59,7 @@ VALID_INTERVALS = {"1h", "1d", "1wk", "1mo"}
 
 _cache: dict = {}
 CACHE_TTL = 60  # segundos
+LIVE_TTL = 20   # segundos: caché más corta para el gráfico en vivo (?live=1)
 
 SOURCE = None                  # IBKRSource, o None para usar Yahoo Finance
 SOURCE_NAME = "Yahoo Finance"
@@ -251,7 +252,7 @@ def _update_incremental(key: tuple, symbol: str, rng: str, interval: str, rth: b
     CACHE.save(key, data, meta["covered_from"])
 
 
-def get_chart(symbol: str, rng: str, interval: str, rth: bool = True) -> dict:
+def get_chart(symbol: str, rng: str, interval: str, rth: bool = True, ttl: float | None = None) -> dict:
     """Velas del rango pedido, usando la caché en disco.
 
     - Si la caché cubre el rango y es reciente (CACHE_TTL), no se consulta la fuente.
@@ -266,7 +267,7 @@ def get_chart(symbol: str, rng: str, interval: str, rth: bool = True) -> dict:
     start = range_start(rng, now)
     meta = CACHE.series(key)
     covered = meta is not None and meta["covered_from"] <= start
-    if covered and now - meta["updated_at"] < CACHE_TTL:
+    if covered and now - meta["updated_at"] < (CACHE_TTL if ttl is None else ttl):
         return _from_cache(key, meta, start)
     try:
         if covered:
@@ -476,8 +477,13 @@ class Handler(SimpleHTTPRequestHandler):
             return self._send_json({**demo_series(symbol, rng, interval), "source": "datos simulados"})
 
         rth = p.get("rth") != "0"
+        live = p.get("live") == "1"  # actualización automática del gráfico: caché más corta
         try:
-            return self._send_json({**get_chart(symbol, rng, interval, rth), "source": SOURCE_NAME})
+            data = get_chart(symbol, rng, interval, rth, LIVE_TTL if live else None)
+            if p.get("since", "").isdigit():  # solo las velas desde esa fecha (respuesta pequeña)
+                since = int(p["since"])
+                data = {**data, "bars": [b for b in data["bars"] if b["time"] >= since]}
+            return self._send_json({**data, "source": SOURCE_NAME})
         except ValueError as e:
             return self._send_json({"error": str(e), "source": SOURCE_NAME}, 404)
         except OfflineError as e:
@@ -503,16 +509,19 @@ class Handler(SimpleHTTPRequestHandler):
         symbols = [s.strip().upper() for s in p.get("symbols", "").split(",") if s.strip()][:MAX_WATCHLIST]
         demo = p.get("demo") == "1"
         want_ext = p.get("ext") == "1"
+        rng = p.get("range", "3mo")  # el escáner pide más historia (medias de 200 sesiones)
+        if rng not in VALID_RANGES:
+            return self._send_json({"error": "Rango no válido"}, 400)
 
         def one(sym: str) -> dict:
             if not SYMBOL_RE.match(sym):
                 return {"symbol": sym, "error": "Símbolo no válido"}
             try:
-                d = demo_series(sym, "3mo", "1d") if demo else get_chart(sym, "3mo", "1d")
+                d = demo_series(sym, rng, "1d") if demo else get_chart(sym, rng, "1d")
             except ValueError as e:
                 return {"symbol": sym, "error": str(e)}
             except OfflineError:
-                d = demo_series(sym, "3mo", "1d")  # sin conexión: simulado, marcado como demo
+                d = demo_series(sym, rng, "1d")  # sin conexión: simulado, marcado como demo
             bars = d["bars"]
             out = {"symbol": sym, "name": d["name"], "currency": d["currency"], "demo": d["demo"],
                    "time": bars[-1]["time"], "closes": [round(b["close"], 6) for b in bars]}

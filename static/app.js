@@ -18,6 +18,9 @@ const DEFAULTS = {
   theme: "dark",
   cmpMode: "perf",
   sideTab: "watch",
+  view: "chart",                                   // "chart" o "scan"
+  scan: { watch: true, pos: true, only: false },   // origen y filtro del escáner
+  scanSort: { key: "rsi", dir: 1 },
   vol: true,
   ext: true, // pre/post-mercado (acciones de EE. UU.)
   bb: { on: true, period: 20, mult: 2, color: "#7e57c2" },
@@ -141,6 +144,7 @@ const priceChart = makeChart($("priceChart"));
 const rsiChart = makeChart($("rsiChart"));
 const cmpChart = makeChart($("cmpChart"));
 let priceSeries = []; // series creadas en el gráfico de precio
+let refs = { vol: null, bb: null, mas: [] }; // las mismas, por papel (para actualizarlas en vivo)
 let mainSeries = null;
 let rsiSeries = null;
 let cmpSeries = [];
@@ -160,6 +164,16 @@ syncRange(rsiChart, priceChart);
 
 const toLine = (bars, vals) => bars.map((b, i) => (vals[i] == null ? { time: b.time } : { time: b.time, value: vals[i] }));
 
+// Punto de cada serie para una vela (los mismos al dibujar y al actualizar en vivo)
+const volPoint = (b, up, down) => ({ time: b.time, value: b.volume,
+  color: (b.close >= b.open ? up : down) + (b.ext ? "22" : "55") });
+function candlePoint(b, up, down) {
+  if (S.chartType === "line") return { time: b.time, value: b.close };
+  if (!b.ext) return b;
+  const c = (b.close >= b.open ? up : down) + "66"; // pre/post-mercado atenuado, como en TradingView
+  return { ...b, color: c, borderColor: c, wickColor: c };
+}
+
 function clearSeries(chart, list) {
   for (const s of list) chart.removeSeries(s);
   list.length = 0;
@@ -169,6 +183,7 @@ function renderPrice(keepRange = true) {
   if (!dataA) return;
   const range = keepRange ? priceChart.timeScale().getVisibleLogicalRange() : null;
   clearSeries(priceChart, priceSeries);
+  refs = { vol: null, bb: null, mas: [] };
   const bars = dataA.bars;
   const up = cssVar("--up"), down = cssVar("--down");
 
@@ -177,11 +192,9 @@ function renderPrice(keepRange = true) {
       priceScaleId: "vol", priceFormat: { type: "volume" }, lastValueVisible: false, priceLineVisible: false,
     });
     priceChart.priceScale("vol").applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
-    vs.setData(bars.map((b) => ({
-      time: b.time, value: b.volume,
-      color: (b.close >= b.open ? up : down) + (b.ext ? "22" : "55"),
-    })));
+    vs.setData(bars.map((b) => volPoint(b, up, down)));
     priceSeries.push(vs);
+    refs.vol = vs;
   }
 
   if (S.bb.on) {
@@ -194,6 +207,7 @@ function renderPrice(keepRange = true) {
     m.setData(toLine(bars, indA.bb.mid));
     l.setData(toLine(bars, indA.bb.lower));
     priceSeries.push(u, m, l);
+    refs.bb = [u, m, l];
   }
 
   S.mas.forEach((ma, i) => {
@@ -203,6 +217,7 @@ function renderPrice(keepRange = true) {
     });
     s.setData(toLine(bars, indA.mas[i]));
     priceSeries.push(s);
+    refs.mas.push([i, s]);
   });
 
   if (S.chartType === "line") {
@@ -210,19 +225,13 @@ function renderPrice(keepRange = true) {
       lineColor: COLOR_A, topColor: COLOR_A + "44", bottomColor: COLOR_A + "05", lineWidth: 2,
       autoscaleInfoProvider: extAutoscale,
     });
-    mainSeries.setData(bars.map((b) => ({ time: b.time, value: b.close })));
   } else {
     mainSeries = priceChart.addCandlestickSeries({
       upColor: up, downColor: down, borderUpColor: up, borderDownColor: down, wickUpColor: up, wickDownColor: down,
       autoscaleInfoProvider: extAutoscale,
     });
-    // Velas de pre/post-mercado atenuadas, como en TradingView
-    mainSeries.setData(bars.map((b) => {
-      if (!b.ext) return b;
-      const c = (b.close >= b.open ? up : down) + "66";
-      return { ...b, color: c, borderColor: c, wickColor: c };
-    }));
   }
+  mainSeries.setData(bars.map((b) => candlePoint(b, up, down)));
   priceSeries.push(mainSeries);
   costLine = null; // las líneas anteriores se fueron con la serie
   extLine = null;
@@ -285,9 +294,11 @@ function updateLegend(idx) {
 }
 
 let crossSyncing = false;
+let hoverIdx = null; // vela bajo el cursor (para no pisar la leyenda al actualizar en vivo)
 priceChart.subscribeCrosshairMove((p) => {
   if (!dataA) return;
   const idx = p.time != null ? timeIndex.get(p.time) : null;
+  hoverIdx = idx ?? null;
   updateLegend(idx);
   if (crossSyncing || !rsiSeries) return;
   crossSyncing = true;
@@ -299,6 +310,7 @@ priceChart.subscribeCrosshairMove((p) => {
 rsiChart.subscribeCrosshairMove((p) => {
   if (!dataA) return;
   const idx = p.time != null ? timeIndex.get(p.time) : null;
+  hoverIdx = idx ?? null;
   updateLegend(idx);
   if (crossSyncing || !mainSeries) return;
   crossSyncing = true;
@@ -406,7 +418,8 @@ function alignSeries(a, b) {
   return out;
 }
 
-function renderCompare() {
+function renderCompare(keepRange = false) {
+  const prevRange = keepRange ? cmpChart.timeScale().getVisibleLogicalRange() : null;
   const block = $("compareBlock");
   $("clearCompare").hidden = !S.compare;
   if (!S.compare || !dataB || !dataA) { block.hidden = true; return; }
@@ -457,7 +470,8 @@ function renderCompare() {
     legend = legendItem(COLOR_A, `RSI ${dataA.symbol}`, fmt(ra.at(-1), 1)) + legendItem(COLOR_B, `RSI ${dataB.symbol}`, fmt(rb.at(-1), 1));
   }
   $("cmpLegend").innerHTML = legend;
-  cmpChart.timeScale().fitContent();
+  if (prevRange) cmpChart.timeScale().setVisibleLogicalRange(prevRange);
+  else cmpChart.timeScale().fitContent();
   renderStats(A, B);
 }
 
@@ -530,6 +544,7 @@ async function wlFetch() {
   WL.loaded = true;
   renderWatchlist();
   refreshQuotes();
+  if (S.view === "scan") loadScan();
 }
 
 // Cambia la lista y la guarda; si el servidor falla, se deshace el cambio.
@@ -551,6 +566,7 @@ async function wlSet(next) {
     banner(`No se pudo guardar la watchlist: ${e.message}`, "error");
   }
   renderWatchlist();
+  if (S.view === "scan") { if (scanMissing()) loadScan(); else renderScan(); }
 }
 
 function wlAdd(sym) {
@@ -588,6 +604,9 @@ async function refreshQuotes(only = null) {
   renderWatchlist();
 }
 
+// Mensaje corto para un valor que no se pudo cargar (el completo va en el title)
+const shortError = (msg) => (/permis/i.test(msg) ? "Sin permisos de datos"
+  : /no reconoce|no encontrado|no válido|no soportado/i.test(msg) ? "Símbolo no encontrado" : "Error al cargar");
 const fmtStamp = (ts) => new Date(ts * 1000).toLocaleString("es-ES",
   { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
 const fmtPrice = (v) => fmt(v, v >= 10000 ? 0 : v < 1 ? 4 : 2);
@@ -621,9 +640,7 @@ function renderWatchlist() {
     if (!q) cells = `<span class="err">cargando…</span>`;
     else if (!ok) {
       const msg = q.error || "Sin datos";
-      const short = /permis/i.test(msg) ? "Sin permisos de datos" : /no reconoce|no encontrado|no válido|no soportado/i.test(msg)
-        ? "Símbolo no encontrado" : "Error al cargar";
-      cells = `<span class="err" title="${esc(msg)}">⚠ ${short}</span>`;
+      cells = `<span class="err" title="${esc(msg)}">⚠ ${shortError(msg)}</span>`;
     }
     else {
       const c = q.closes, last = c.at(-1), prev = c.at(-2) ?? last, chg = last / prev - 1;
@@ -718,7 +735,7 @@ function renderWatchlist() {
   });
 
   // Refresco automático cada minuto mientras la pestaña esté visible
-  setInterval(() => { if (document.visibilityState === "visible") { refreshQuotes(); loadExt(); loadPositions(); } }, 60_000);
+  setInterval(() => { if (document.visibilityState === "visible") { refreshQuotes(); loadExt(); loadPositions(); if (S.view === "scan") loadScan(); } }, 60_000);
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "visible" && (!WL.updated || Date.now() - WL.updated > 60_000)) refreshQuotes();
   });
@@ -821,6 +838,7 @@ async function loadPositions() {
   }
   renderPositions();
   updatePositionOverlay();
+  if (S.view === "scan" && scanMissing()) loadScan();
 }
 
 function renderPositions() {
@@ -886,6 +904,308 @@ $("posList").addEventListener("click", (e) => {
 $("posRefresh").addEventListener("click", () => loadPositions());
 
 // ---------------------------------------------------------------------------
+// Escáner de señales: favoritos y cartera con velas diarias y tus ajustes
+// ---------------------------------------------------------------------------
+const SCAN = { quotes: new Map(), range: null, loading: false, at: null };
+
+// Valores a escanear: símbolo → { watch, pos }
+function scanSymbols() {
+  const out = new Map();
+  if (S.scan.watch) for (const sym of WL.symbols) out.set(sym, { watch: true, pos: null });
+  if (S.scan.pos && POS?.available) {
+    for (const p of POS.positions) {
+      if (!p.symbol || p.type !== "STK") continue;
+      const e = out.get(p.symbol) || { watch: WL.symbols.includes(p.symbol), pos: null };
+      e.pos = p;
+      out.set(p.symbol, e);
+    }
+  }
+  return out;
+}
+
+// Historia necesaria según los periodos configurados (p. ej. SMA 200 → 1 año)
+function scanRange() {
+  const need = Math.max(S.bb.period, S.rsi.period * 4, ...S.mas.filter((m) => m.on).map((m) => m.period)) + 5;
+  return need <= 240 ? "1y" : need <= 490 ? "2y" : "5y";
+}
+const scanMissing = () => SCAN.range !== scanRange() || [...scanSymbols().keys()].some((s) => !SCAN.quotes.has(s));
+
+async function loadScan() {
+  const syms = [...scanSymbols().keys()];
+  if (!syms.length || SCAN.loading) { renderScan(); return; }
+  SCAN.loading = true;
+  renderScan();
+  const range = scanRange();
+  try {
+    const q = new URLSearchParams({ symbols: syms.join(","), range });
+    if (S.demo) q.set("demo", "1");
+    const body = await (await fetch("/api/quotes?" + q)).json();
+    SCAN.quotes = new Map((body.quotes || []).map((x) => [x.symbol, x]));
+    SCAN.range = range;
+    SCAN.at = new Date();
+  } catch { /* se reintenta en el siguiente ciclo o con «Actualizar» */ }
+  SCAN.loading = false;
+  renderScan();
+}
+
+function analyze(closes) {
+  const n = closes.length - 1, c = closes[n];
+  const r = rsi(closes, S.rsi.period)[n];
+  const b = bbInfo(closes, bollinger(closes, S.bb.period, S.bb.mult));
+  const active = S.mas.filter((m) => m.on);
+  const vals = active.map((m) => movingAverage(closes, m.period, m.type));
+  const dist = vals.map((v) => (v[n] == null ? null : c / v[n] - 1));
+  // Último cruce entre la media más corta y la más larga
+  let cross = null;
+  if (active.length >= 2) {
+    const order = active.map((m, i) => [m.period, i]).sort((x, y) => x[0] - y[0]);
+    const f = vals[order[0][1]], sl = vals[order.at(-1)[1]];
+    for (let i = n; i > 0 && !cross; i--) {
+      if ([f[i], sl[i], f[i - 1], sl[i - 1]].some((v) => v == null)) break;
+      if (f[i] > sl[i] && f[i - 1] <= sl[i - 1]) cross = { type: "up", ago: n - i };
+      if (f[i] < sl[i] && f[i - 1] >= sl[i - 1]) cross = { type: "down", ago: n - i };
+    }
+    if (!cross && f[n] != null && sl[n] != null) cross = { type: f[n] > sl[n] ? "up" : "down", ago: null };
+  }
+  const signals = [];
+  if (r != null && r <= S.rsi.low) signals.push(["Sobreventa", "up"]);
+  if (r != null && r >= S.rsi.high) signals.push(["Sobrecompra", "down"]);
+  if (b && b.c < b.l) signals.push(["Bajo banda inf.", "up"]);
+  if (b && b.c > b.u) signals.push(["Sobre banda sup.", "down"]);
+  if (cross?.ago != null && cross.ago <= 5) {
+    signals.push(cross.type === "up" ? ["Cruce alcista", "up"] : ["Cruce bajista", "down"]);
+  }
+  return { last: c, day: n > 0 ? c / closes[n - 1] - 1 : null, rsi: r, pctB: b?.pctB, width: b?.width, dist, cross, signals };
+}
+
+function scanColumns(rows) {
+  const active = S.mas.filter((m) => m.on);
+  const sorted = active.map((m) => m.period).sort((a, b) => a - b);
+  const toneOf = (v) => (v == null ? "" : v >= 0 ? "up" : "down");
+  const cols = [
+    { key: "sym", label: "Valor", val: (r) => r.sym, html: (r) =>
+      `<b>${esc(r.sym)}</b>${r.watch ? '<span class="src fav" title="En favoritos">★</span>' : ""}` +
+      `${r.pos ? '<span class="src pos" title="En cartera">cartera</span>' : ""}` +
+      `${r.q?.demo ? '<span class="sim">SIM</span>' : ""}${r.q?.stale ? '<span class="sim">CACHÉ</span>' : ""}` +
+      `<small>${esc((r.q?.name || "").replace(" (simulado)", ""))}</small>` },
+    { key: "last", label: "Último", val: (r) => r.a?.last, html: (r) => fmtPrice(r.a.last) },
+    { key: "day", label: "Día", val: (r) => r.a?.day, html: (r) => `<span class="${toneOf(r.a.day)}">${pct(r.a.day)}</span>` },
+    { key: "rsi", label: `RSI(${S.rsi.period})`, val: (r) => r.a?.rsi, html: (r) => {
+      const v = r.a.rsi, c = v == null ? "" : v <= S.rsi.low ? "up" : v >= S.rsi.high ? "down" : "";
+      return `<span class="${c}">${fmt(v, 1)}</span>`; } },
+    { key: "pctB", label: "%B", val: (r) => r.a?.pctB, html: (r) => {
+      const v = r.a.pctB, c = v == null ? "" : v < 0 ? "up" : v > 1 ? "down" : "";
+      return `<span class="${c}">${fmt(v, 2)}</span>`; } },
+    { key: "width", label: "Ancho BB", val: (r) => r.a?.width, html: (r) => pct(r.a.width).replace("+", "") },
+    ...active.map((m, k) => ({ key: `ma${k}`, label: `vs ${m.type} ${m.period}`, val: (r) => r.a?.dist[k],
+      html: (r) => `<span class="${toneOf(r.a.dist[k])}">${pct(r.a.dist[k])}</span>` })),
+  ];
+  if (active.length >= 2) {
+    cols.push({ key: "cross", label: `Cruce ${sorted[0]}/${sorted.at(-1)}`,
+      val: (r) => (r.a?.cross?.ago ?? null), html: (r) => {
+        const x = r.a.cross;
+        if (!x) return "—";
+        const arrow = x.type === "up" ? "▲" : "▼", cls = x.type === "up" ? "up" : "down";
+        return x.ago == null ? `<span class="muted">${arrow} ${x.type === "up" ? "por encima" : "por debajo"}</span>`
+          : `<span class="${cls}">${arrow} ${x.type === "up" ? "alcista" : "bajista"}</span> <span class="muted">hace ${x.ago}</span>`;
+      } });
+  }
+  if (rows.some((r) => r.pos)) {
+    cols.push({ key: "pnl", label: "P&G latente", val: (r) => r.pos?.pnl_pct, html: (r) =>
+      r.pos?.pnl_pct == null ? "" : `<span class="${toneOf(r.pos.pnl_pct)}">${pct(r.pos.pnl_pct)}</span>` });
+  }
+  cols.push({ key: "sig", label: "Señales", val: (r) => r.a?.signals.length, html: (r) =>
+    r.a.signals.map(([t, c]) => tag(t, c)).join("") || '<span class="muted">—</span>' });
+  return cols;
+}
+
+function renderScan() {
+  if (S.view !== "scan") return;
+  const syms = scanSymbols();
+  const msg = $("scanMsg");
+  const rows = [...syms].map(([sym, e]) => {
+    const q = SCAN.quotes.get(sym);
+    const a = q && !q.error && q.closes?.length > 1 ? analyze(q.closes) : null;
+    return { sym, ...e, q, a };
+  });
+  if (!rows.length) {
+    $("scanTable").innerHTML = "";
+    $("scanSummary").textContent = "";
+    msg.hidden = false;
+    msg.textContent = S.scan.watch || S.scan.pos
+      ? "No hay valores que escanear: añade favoritos o abre posiciones en IBKR." : "Activa Favoritos o Cartera.";
+    return;
+  }
+  const valid = rows.filter((r) => r.a);
+  const count = (f) => valid.filter(f).length;
+  $("scanSummary").textContent = SCAN.loading && !valid.length ? `Cargando ${rows.length} valores…` :
+    `${valid.length} valores · ${count((r) => r.a.rsi <= S.rsi.low)} en sobreventa · ` +
+    `${count((r) => r.a.rsi >= S.rsi.high)} en sobrecompra · ${count((r) => r.a.pctB < 0 || r.a.pctB > 1)} fuera de bandas` +
+    (SCAN.at ? ` · actualizado ${SCAN.at.toLocaleTimeString("es-ES", { hour: "2-digit", minute: "2-digit" })}` : "") +
+    (SCAN.loading ? " · actualizando…" : "");
+
+  const cols = scanColumns(rows);
+  let sort = cols.find((c) => c.key === S.scanSort.key);
+  if (!sort) { S.scanSort = { key: "rsi", dir: 1 }; sort = cols.find((c) => c.key === "rsi"); }
+  const dir = S.scanSort.dir;
+  const shown = rows.filter((r) => !S.scan.only || r.a?.signals.length).sort((x, y) => {
+    const a = sort.val(x), b = sort.val(y);
+    if (a == null && b == null) return 0;
+    if (a == null) return 1;   // sin dato: siempre al final
+    if (b == null) return -1;
+    return (typeof a === "string" ? a.localeCompare(b) : a - b) * dir;
+  });
+  const head = "<thead><tr>" + cols.map((c) =>
+    `<th data-key="${c.key}" class="${c.key === sort.key ? "sorted" : ""}">${c.label}${c.key === sort.key ? (dir > 0 ? " ▲" : " ▼") : ""}</th>`
+  ).join("") + "</tr></thead>";
+  const body = shown.map((r) => {
+    if (!r.a) {
+      const why = r.q?.error ? `⚠ ${shortError(r.q.error)}` : SCAN.loading ? "cargando…" : "sin datos";
+      return `<tr class="err" data-sym="${esc(r.sym)}" title="${esc(r.q?.error || "")}"><td>${cols[0].html(r)}</td>` +
+        `<td colspan="${cols.length - 1}">${why}</td></tr>`;
+    }
+    return `<tr data-sym="${esc(r.sym)}">${cols.map((c) => `<td>${c.html(r)}</td>`).join("")}</tr>`;
+  }).join("");
+  $("scanTable").innerHTML = head + "<tbody>" + body + "</tbody>";
+  msg.hidden = shown.length > 0;
+  msg.textContent = "Ningún valor tiene señales ahora mismo.";
+}
+
+$("scanTable").addEventListener("click", (e) => {
+  const th = e.target.closest("th[data-key]");
+  if (th) {
+    const key = th.dataset.key;
+    S.scanSort = S.scanSort.key === key ? { key, dir: -S.scanSort.dir } : { key, dir: key === "sig" ? -1 : 1 };
+    save();
+    renderScan();
+    return;
+  }
+  const tr = e.target.closest("tr[data-sym]");
+  if (tr && !tr.classList.contains("err")) {
+    setView("chart");
+    if (tr.dataset.sym !== S.symbol) { S.symbol = tr.dataset.sym; load(); }
+  }
+});
+for (const [id, key] of [["scanWatch", "watch"], ["scanPos", "pos"], ["scanOnly", "only"]]) {
+  $(id).addEventListener("change", (e) => {
+    S.scan = { ...S.scan, [key]: e.target.checked };
+    save();
+    if (scanMissing()) loadScan(); else renderScan();
+  });
+}
+$("scanRefresh").addEventListener("click", () => loadScan());
+
+function setView(v) {
+  S.view = v === "scan" ? "scan" : "chart";
+  $("chartView").hidden = S.view !== "chart";
+  $("scanView").hidden = S.view !== "scan";
+  document.querySelectorAll("#viewSeg button").forEach((b) => b.classList.toggle("active", b.dataset.view === S.view));
+  $("scanWatch").checked = S.scan.watch;
+  $("scanPos").checked = S.scan.pos;
+  $("scanOnly").checked = S.scan.only;
+  save();
+  if (S.view === "scan") loadScan();
+}
+$("viewSeg").addEventListener("click", (e) => {
+  const v = e.target.closest("button")?.dataset.view;
+  if (v && v !== S.view) setView(v);
+});
+
+// ---------------------------------------------------------------------------
+// Gráfico en vivo: cada 30 s se piden solo las velas recientes y se actualizan
+// la vela en curso, el volumen y los indicadores sin redibujar el gráfico.
+// ---------------------------------------------------------------------------
+const LIVE_EVERY = 30_000;
+let liveBusy = false;
+
+// Incorpora las velas recientes a `data`. Devuelve el índice desde el que cambió algo,
+// null si no hay cambios, o -1 si no cuadran con lo que había (split…) y hay que recargar.
+function mergeBars(data, fresh) {
+  const bars = data.bars, last = bars.length - 1, lastT = bars[last].time;
+  const tail = fresh.filter((b) => b.time >= lastT);
+  if (!tail.length) return null;
+  if (tail[0].time !== lastT) { bars.push(...tail); return last + 1; }
+  const old = bars[last], now = tail[0];
+  if (Math.abs(now.close / old.close - 1) > 0.15) return -1;
+  const same = tail.length === 1 && !!now.ext === !!old.ext &&
+    ["open", "high", "low", "close", "volume"].every((k) => now[k] === old[k]);
+  if (same) return null;
+  bars.splice(last, 1, ...tail);
+  return last;
+}
+
+async function fetchRecent(symbol, since) {
+  const q = new URLSearchParams({ symbol, range: S.range, interval: S.interval, live: "1", since: String(since) });
+  if (S.ext && S.interval === "1h") q.set("rth", "0");
+  const res = await fetch("/api/chart?" + q);
+  if (!res.ok) return null;
+  const body = await res.json();
+  return body.stale ? null : body; // sin conexión con la fuente: se deja lo que hay
+}
+
+// Actualiza las series del gráfico de precio y del RSI desde la vela `from`
+function applyLive(from) {
+  indA = computeIndicators(dataA.bars);
+  timeIndex = new Map(dataA.bars.map((b, i) => [b.time, i]));
+  const bars = dataA.bars, up = cssVar("--up"), down = cssVar("--down");
+  const pt = (vals, i) => (vals[i] == null ? { time: bars[i].time } : { time: bars[i].time, value: vals[i] });
+  for (let i = from; i < bars.length; i++) {
+    mainSeries?.update(candlePoint(bars[i], up, down));
+    refs.vol?.update(volPoint(bars[i], up, down));
+    if (refs.bb) [indA.bb.upper, indA.bb.mid, indA.bb.lower].forEach((v, k) => refs.bb[k].update(pt(v, i)));
+    for (const [k, series] of refs.mas) series.update(pt(indA.mas[k], i));
+    rsiSeries?.update(pt(indA.rsi, i));
+  }
+  updateLegend(hoverIdx);
+  renderQuote();
+  renderSignals();
+  updateExtLine();
+}
+
+function setLive(state, detail = "") {
+  const el = $("liveDot");
+  el.hidden = state === "off";
+  el.className = "live-dot " + state;
+  el.title = state === "on" ? `En directo: se actualiza cada 30 s (última: ${new Date().toLocaleTimeString("es-ES")})`
+    : `Actualización en pausa${detail ? ": " + detail : ""}`;
+}
+
+async function liveUpdate() {
+  if (liveBusy || !dataA || S.demo) { if (S.demo) setLive("off"); return; }
+  if (document.visibilityState !== "visible") return;
+  liveBusy = true;
+  const token = loadToken;
+  try {
+    // Sin conexión al cargar (datos guardados o simulados): si la fuente ya responde, recargar una vez
+    if (dataA.stale || dataA.offlineFallback) {
+      const probe = await fetchRecent(S.symbol, Math.floor(Date.now() / 1000) - 86400);
+      if (token === loadToken && probe) load();
+      else setLive("paused", "sin conexión con la fuente de datos");
+      return;
+    }
+    const [fa, fb] = await Promise.all([
+      fetchRecent(dataA.symbol, dataA.bars.at(-1).time),
+      dataB && !dataB.demo ? fetchRecent(dataB.symbol, dataB.bars.at(-1).time) : null,
+    ]);
+    if (token !== loadToken) return; // se cambió de valor, rango o intervalo mientras tanto
+    if (!fa) { setLive("paused", "sin conexión con la fuente de datos"); return; }
+    const from = mergeBars(dataA, fa.bars);
+    const fromB = fb ? mergeBars(dataB, fb.bars) : null;
+    if (from === -1 || fromB === -1) { load(); return; } // el histórico cambió (split o ajuste)
+    if (from != null) applyLive(from);
+    if (dataB && (from != null || fromB != null)) renderCompare(true);
+    setLive("on");
+  } catch {
+    setLive("paused", "error al actualizar");
+  } finally {
+    liveBusy = false;
+  }
+}
+
+setInterval(liveUpdate, LIVE_EVERY);
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") liveUpdate(); });
+
+// ---------------------------------------------------------------------------
 // Carga y render global
 // ---------------------------------------------------------------------------
 function banner(msg, kind = "warn") {
@@ -905,6 +1225,7 @@ function recompute(keepRange = true) {
   renderCompare();
   renderWatchlist();
   renderPositions();
+  if (S.view === "scan") { if (scanMissing()) loadScan(); else renderScan(); }
 }
 
 let loadToken = 0;
@@ -937,6 +1258,8 @@ async function load() {
     $("dataSource").textContent = a.demo ? "simulados" : (a.source || "—") + (a.stale ? " (datos guardados)" : "");
     recompute(false);
     loadExt();
+    setLive(a.demo && !a.offlineFallback ? "off" : a.stale || a.offlineFallback ? "paused" : "on",
+      a.stale || a.offlineFallback ? "sin conexión con la fuente de datos" : "");
   } catch (e) {
     if (token !== loadToken) return;
     banner(`No se pudo cargar ${S.symbol}: ${e.message}`, "error");
@@ -1127,6 +1450,7 @@ window.addEventListener("hashchange", () => {
 
 applyTheme();
 setTab(S.sideTab);
+setView(S.view);
 load();
 wlFetch();
 loadPositions();
