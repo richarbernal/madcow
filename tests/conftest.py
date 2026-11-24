@@ -20,6 +20,7 @@ import ib_async  # noqa: E402
 import fake_tws  # noqa: E402
 import ibkr  # noqa: E402
 import server  # noqa: E402
+from alerts import AlertEngine  # noqa: E402
 from histcache import HistCache  # noqa: E402
 
 
@@ -54,6 +55,9 @@ def app(tws, tmp_path, monkeypatch):
     monkeypatch.setattr(server, "PASSWORD", "")
     monkeypatch.setattr(server, "EXTRA_HOSTS", set())
     monkeypatch.setattr(server, "_cache", {})
+    # Alertas sin hilo periódico: los tests llaman a check() cuando quieren (y sin caché, ttl=0)
+    monkeypatch.setattr(server, "ALERTS", AlertEngine(
+        tmp_path / "alerts.json", fetch=lambda symbol, rng: server.get_chart(symbol, rng, "1d", ttl=0)))
     yield server
     src.close()
 

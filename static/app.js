@@ -21,6 +21,7 @@ const DEFAULTS = {
   view: "chart",                                   // "chart" o "scan"
   scan: { watch: true, pos: true, only: false },   // origen y filtro del escáner
   scanSort: { key: "rsi", dir: 1 },
+  alertSound: true,
   vol: true,
   ext: true, // pre/post-mercado (acciones de EE. UU.)
   bb: { on: true, period: 20, mult: 2, color: "#7e57c2" },
@@ -235,8 +236,10 @@ function renderPrice(keepRange = true) {
   priceSeries.push(mainSeries);
   costLine = null; // las líneas anteriores se fueron con la serie
   extLine = null;
+  alertLines = [];
   updatePositionOverlay();
   updateExtLine();
+  updateAlertLines();
   priceChart.priceScale("right").applyOptions({ scaleMargins: { top: 0.08, bottom: S.vol ? 0.2 : 0.06 } });
 
   renderRsi();
@@ -334,7 +337,7 @@ function renderQuote() {
   $("qChange").innerHTML =
     `<span class="${ch >= 0 ? "up" : "down"}">${pct(ch)}</span> ` +
     `<span class="muted small">periodo: </span><span class="${chPeriod >= 0 ? "up" : "down"} small">${pct(chPeriod)}</span>`;
-  document.title = `${dataA.symbol} ${fmt(last.close)} · MadCow Charts`;
+  setTitle(`${dataA.symbol} ${fmt(last.close)} · MadCow Charts`);
 }
 
 const tag = (text, kind) => `<span class="tag ${kind}">${text}</span>`;
@@ -1112,6 +1115,276 @@ $("viewSeg").addEventListener("click", (e) => {
 });
 
 // ---------------------------------------------------------------------------
+// Alertas: las comprueba el servidor; aquí se crean, se listan y se avisa
+// ---------------------------------------------------------------------------
+let ALERT_DATA = null;                 // última respuesta de /api/alerts
+let alertLines = [];                   // niveles de las alertas de precio en el gráfico
+const SEEN_KEY = "madcow.alerts.seen"; // último aviso notificado en este navegador
+let seenEvent = (() => { try { const v = localStorage.getItem(SEEN_KEY); return v == null ? null : +v; } catch { return null; } })();
+let baseTitle = "MadCow Charts";
+
+function setTitle(t) {
+  if (t) baseTitle = t;
+  const n = ALERT_DATA?.unread || 0;
+  document.title = (n ? `(${n}) ` : "") + baseTitle;
+}
+
+async function loadAlerts() {
+  try {
+    const res = await fetch("/api/alerts");
+    if (!res.ok) return;
+    ALERT_DATA = await res.json();
+  } catch { return; }
+  // Avisos nuevos desde la última vez (la primera vez solo se toma nota, sin avisar de los antiguos)
+  const fresh = seenEvent == null ? [] : ALERT_DATA.events.filter((e) => e.id > seenEvent).reverse();
+  if (seenEvent == null || ALERT_DATA.last_event > seenEvent) {
+    seenEvent = ALERT_DATA.last_event;
+    try { localStorage.setItem(SEEN_KEY, String(seenEvent)); } catch { /* sin almacenamiento */ }
+  }
+  fresh.forEach(notifyEvent);
+  if (S.sideTab === "alerts" && ALERT_DATA.unread) markAlertsRead();
+  renderAlerts();
+  updateAlertLines();
+}
+
+async function alertRequest(method, path, body) {
+  const res = await fetch(path, { method, headers: { "Content-Type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body) });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `error ${res.status}`);
+  return data;
+}
+
+async function markAlertsRead() {
+  if (!ALERT_DATA?.unread) return;
+  try {
+    ALERT_DATA = await alertRequest("POST", "/api/alerts/read", { upto: ALERT_DATA.last_event });
+    renderAlerts();
+  } catch { /* se reintenta en el siguiente ciclo */ }
+}
+
+// ---- formulario ----
+const ALERT_PRICE = new Set(["price_above", "price_below"]);
+const ALERT_RSI = new Set(["rsi_above", "rsi_below"]);
+
+function alertPriceDefault(type) {
+  const last = dataA && dataA.symbol === S.symbol ? dataA.bars.at(-1).close : null;
+  if (last == null) return "";
+  const v = last * (type === "price_above" ? 1.05 : 0.95);
+  return v >= 1 ? v.toFixed(2) : v.toPrecision(4);
+}
+
+let alertFormKey = null; // valor para el que se rellenó el formulario
+function syncAlertForm(resetValue = true) {
+  const key = dataA?.symbol === S.symbol ? S.symbol : null;
+  if (key !== alertFormKey) { resetValue = true; alertFormKey = key; } // otro valor: nuevas sugerencias
+  const type = $("alertType").value;
+  $("alertSym").textContent = S.symbol;
+  $("alertValueRow").hidden = !ALERT_PRICE.has(type) && !ALERT_RSI.has(type);
+  $("alertValueLabel").textContent = ALERT_RSI.has(type) ? `Nivel de RSI(${S.rsi.period})` : "Precio";
+  if (resetValue) $("alertValue").value = ALERT_RSI.has(type) ? (type === "rsi_above" ? S.rsi.high : S.rsi.low) : alertPriceDefault(type);
+  const isCross = type.startsWith("ma_cross"), isMa = type.endsWith("_ma");
+  $("alertCrossRow").hidden = !isCross;
+  $("alertMaRow").hidden = !isMa;
+  const opts = S.mas.map((m, i) => `<option value="${i}">${m.type} ${m.period}</option>`).join("");
+  for (const id of ["alertMa", "alertFast", "alertSlow"]) {
+    const sel = $(id), prev = sel.value;
+    sel.innerHTML = opts;
+    if (prev !== "" && +prev < S.mas.length) sel.value = prev;
+  }
+  if (isCross && resetValue) {
+    const byPeriod = S.mas.map((m, i) => [m.period, i]).sort((a, b) => a[0] - b[0]);
+    if (byPeriod.length) { $("alertFast").value = byPeriod[0][1]; $("alertSlow").value = byPeriod.at(-1)[1]; }
+  }
+  if (isMa && resetValue && S.mas.length) {
+    $("alertMa").value = S.mas.reduce((best, m, i) => (m.period > S.mas[best].period ? i : best), 0);
+  }
+  $("alertParams").textContent = type.startsWith("bb_") ? `Con tus bandas: Bollinger (${S.bb.period}, ${S.bb.mult}).`
+    : ALERT_RSI.has(type) ? `Con tu RSI de ${S.rsi.period} sesiones.` : "";
+  $("alertError").hidden = true;
+}
+
+$("alertType").addEventListener("change", () => syncAlertForm());
+$("alertForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const type = $("alertType").value;
+  const body = { symbol: S.symbol, type, repeat: $("alertRepeat").checked };
+  if (ALERT_PRICE.has(type) || ALERT_RSI.has(type)) body.value = parseFloat($("alertValue").value);
+  if (ALERT_RSI.has(type)) body.rsi_period = S.rsi.period;
+  if (type.startsWith("bb_")) Object.assign(body, { bb_period: S.bb.period, bb_mult: S.bb.mult });
+  if (type.startsWith("ma_cross")) {
+    const f = S.mas[+$("alertFast").value], sl = S.mas[+$("alertSlow").value];
+    if (!f || !sl) { showAlertError("Configura al menos dos medias en Indicadores."); return; }
+    if (f.type !== sl.type) { showAlertError("Elige dos medias del mismo tipo (SMA o EMA)."); return; }
+    Object.assign(body, { ma_type: f.type, ma_fast: f.period, ma_slow: sl.period });
+  }
+  if (type.endsWith("_ma")) {
+    const m = S.mas[+$("alertMa").value];
+    if (!m) { showAlertError("Configura una media en Indicadores."); return; }
+    Object.assign(body, { ma_type: m.type, ma_period: m.period });
+  }
+  try {
+    const a = await alertRequest("POST", "/api/alerts", body);
+    toast("Alerta creada", `${a.symbol}: ${a.description}`, null, 5_000);
+    $("alertError").hidden = true;
+    loadAlerts();
+  } catch (err) {
+    showAlertError(err.message);
+  }
+});
+function showAlertError(msg) {
+  $("alertError").textContent = msg;
+  $("alertError").hidden = false;
+}
+
+// ---- listas ----
+function renderAlerts() {
+  syncAlertForm(false);
+  const d = ALERT_DATA;
+  const badge = $("alertBadge");
+  badge.hidden = !d?.unread;
+  badge.textContent = d?.unread || "";
+  setTitle();
+  if (!d) return;
+  const list = [...d.alerts].sort((a, b) => a.symbol.localeCompare(b.symbol) || a.created - b.created);
+  $("alertEmpty").hidden = list.length > 0;
+  $("alertList").innerHTML = list.map((a) => {
+    const st = a.status;
+    const now = !st ? "pendiente de comprobar" : st.error ? `⚠ ${st.text}` : `ahora: ${st.text}`;
+    const fired = a.triggered ? ` · saltó ${a.triggered === 1 ? "1 vez" : `${a.triggered} veces`}, la última el ${fmtStamp(a.last_triggered)}` : "";
+    return `<li class="alert-row${a.enabled ? "" : " off"}" data-id="${esc(a.id)}">
+      <div><b class="link" data-sym="${esc(a.symbol)}">${esc(a.symbol)}</b> ${esc(a.description)}
+        <small>${esc(now)} · ${a.repeat ? "repetible" : "una vez"}${esc(fired)}</small></div>
+      <label class="switch" title="${a.enabled ? "Desactivar" : "Activar"}"><input type="checkbox" data-act="toggle" ${a.enabled ? "checked" : ""}><span></span></label>
+      <button type="button" class="del" data-act="del" title="Borrar alerta">✕</button></li>`;
+  }).join("");
+  $("eventEmpty").hidden = d.events.length > 0;
+  $("eventClear").hidden = !d.events.length;
+  $("eventList").innerHTML = d.events.slice(0, 30).map((e) =>
+    `<li class="${e.read ? "" : "unread"}"><time>${fmtStamp(e.time)}</time><span class="link" data-sym="${esc(e.symbol)}">${esc(e.message)}</span></li>`
+  ).join("");
+}
+
+$("alertList").addEventListener("click", async (e) => {
+  const sym = e.target.closest("[data-sym]")?.dataset.sym;
+  if (sym) { openSymbol(sym); return; }
+  const li = e.target.closest("li[data-id]"), act = e.target.dataset.act;
+  if (!li || act !== "del") return;
+  try { ALERT_DATA = await alertRequest("DELETE", `/api/alerts/${li.dataset.id}`); renderAlerts(); updateAlertLines(); }
+  catch (err) { banner(`No se pudo borrar la alerta: ${err.message}`, "error"); }
+});
+$("alertList").addEventListener("change", async (e) => {
+  const li = e.target.closest("li[data-id]");
+  if (!li || e.target.dataset.act !== "toggle") return;
+  try { ALERT_DATA = await alertRequest("PUT", `/api/alerts/${li.dataset.id}`, { enabled: e.target.checked }); renderAlerts(); updateAlertLines(); }
+  catch (err) { banner(`No se pudo cambiar la alerta: ${err.message}`, "error"); }
+});
+$("eventList").addEventListener("click", (e) => {
+  const sym = e.target.closest("[data-sym]")?.dataset.sym;
+  if (sym) openSymbol(sym);
+});
+$("eventClear").addEventListener("click", async () => {
+  try { ALERT_DATA = await alertRequest("DELETE", "/api/alerts/events"); renderAlerts(); } catch { /* sin cambios */ }
+});
+$("bellBtn").addEventListener("click", () => {
+  setTab("alerts");
+  save();
+  markAlertsRead();
+  syncAlertForm();
+  $("alertType").focus();
+});
+
+function openSymbol(sym) {
+  if (S.view !== "chart") setView("chart");
+  if (sym !== S.symbol) { S.symbol = sym; load(); }
+}
+
+// Niveles de las alertas de precio del valor abierto, en el gráfico
+function updateAlertLines() {
+  if (!mainSeries) return;
+  for (const l of alertLines) { try { mainSeries.removePriceLine(l); } catch { /* serie ya rehecha */ } }
+  alertLines = [];
+  if (!ALERT_DATA || !dataA || dataA.demo) return;
+  for (const a of ALERT_DATA.alerts) {
+    if (!a.enabled || a.symbol !== S.symbol || !ALERT_PRICE.has(a.type)) continue;
+    alertLines.push(mainSeries.createPriceLine({
+      price: a.value, color: "#ec407a", lineWidth: 1, lineStyle: LWC.LineStyle.Dotted,
+      axisLabelVisible: true, title: a.type === "price_above" ? "Alerta ↑" : "Alerta ↓",
+    }));
+  }
+}
+
+// ---- avisos: dentro de la app, sonido y notificación del sistema ----
+const canNotify = () => "Notification" in window && window.isSecureContext;
+
+function renderNotifyBox() {
+  const box = $("notifyBox");
+  $("alertSound").checked = S.alertSound;
+  if (!canNotify()) {
+    box.innerHTML = '<span class="muted">Las notificaciones del sistema solo funcionan abriendo la app en el propio PC ' +
+      "(http://localhost). Aquí verás los avisos dentro de la app.</span>";
+  } else if (Notification.permission === "granted") {
+    box.innerHTML = '<span class="up">✓ Notificaciones del sistema activadas.</span>';
+  } else if (Notification.permission === "denied") {
+    box.innerHTML = '<span class="muted">El navegador tiene bloqueadas las notificaciones de esta página; ' +
+      "puedes permitirlas en los ajustes del sitio.</span>";
+  } else {
+    box.innerHTML = '<button type="button" class="btn" id="notifyBtn">Activar notificaciones del sistema</button>';
+    $("notifyBtn").addEventListener("click", () => Notification.requestPermission().then(renderNotifyBox));
+  }
+}
+$("alertSound").addEventListener("change", (e) => { S.alertSound = e.target.checked; save(); if (S.alertSound) beep(); });
+
+let audioCtx = null;
+// Los navegadores solo permiten sonido tras una interacción: se prepara en el primer clic
+document.addEventListener("pointerdown", () => {
+  try {
+    audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === "suspended") audioCtx.resume();
+  } catch { /* sin audio */ }
+});
+function beep() {
+  if (!audioCtx || !S.alertSound) return;
+  const t0 = audioCtx.currentTime;
+  [880, 1175].forEach((freq, i) => {
+    const t = t0 + i * 0.18, osc = audioCtx.createOscillator(), gain = audioCtx.createGain();
+    osc.frequency.value = freq;
+    gain.gain.setValueAtTime(0.0001, t);
+    gain.gain.exponentialRampToValueAtTime(0.25, t + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.16);
+    osc.connect(gain).connect(audioCtx.destination);
+    osc.start(t);
+    osc.stop(t + 0.18);
+  });
+}
+
+function toast(title, text, sym = null, ms = 15_000) {
+  const el = document.createElement("div");
+  el.className = "toast";
+  el.innerHTML = `<b>${esc(title)}</b>${esc(text)}<button type="button" class="x" aria-label="Cerrar">✕</button>`;
+  el.addEventListener("click", (e) => {
+    if (!e.target.closest(".x") && sym) openSymbol(sym);
+    el.remove();
+  });
+  $("toasts").appendChild(el);
+  setTimeout(() => el.remove(), ms);
+}
+
+function notifyEvent(e) {
+  toast(`🔔 ${e.symbol}`, e.message.replace(`${e.symbol}: `, ""), e.symbol);
+  beep();
+  if (canNotify() && Notification.permission === "granted") {
+    try {
+      const n = new Notification(`MadCow · ${e.symbol}`, { body: e.message, tag: `madcow-${e.id}` });
+      n.onclick = () => { window.focus(); openSymbol(e.symbol); n.close(); };
+    } catch { /* algunos navegadores solo permiten notificaciones desde un service worker */ }
+  }
+}
+
+setInterval(() => { if (document.visibilityState === "visible") loadAlerts(); }, 30_000);
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") loadAlerts(); });
+
+// ---------------------------------------------------------------------------
 // Gráfico en vivo: cada 30 s se piden solo las velas recientes y se actualizan
 // la vela en curso, el volumen y los indicadores sin redibujar el gráfico.
 // ---------------------------------------------------------------------------
@@ -1225,6 +1498,7 @@ function recompute(keepRange = true) {
   renderCompare();
   renderWatchlist();
   renderPositions();
+  if (ALERT_DATA) renderAlerts();
   if (S.view === "scan") { if (scanMissing()) loadScan(); else renderScan(); }
 }
 
@@ -1373,7 +1647,12 @@ function setTab(t) {
 }
 document.querySelector(".tabs").addEventListener("click", (e) => {
   const t = e.target.closest("button")?.dataset.tab;
-  if (t) { setTab(t); save(); if (t === "pos") loadPositions(); }
+  if (t) {
+    setTab(t);
+    save();
+    if (t === "pos") loadPositions();
+    if (t === "alerts") { markAlertsRead(); syncAlertForm(); }
+  }
 });
 
 function applyTheme() {
@@ -1454,3 +1733,5 @@ setView(S.view);
 load();
 wlFetch();
 loadPositions();
+loadAlerts();
+renderNotifyBox();

@@ -31,6 +31,15 @@ tu ordenador. La conexión es de **solo lectura**: la app no puede enviar órden
    El puerto se detecta solo (prueba 7496, 4001, 7497 y 4002). Para fijarlo: `--ib-port 7497`.
    La terminal indica si se ha conectado.
 
+### En Windows: doble clic
+
+- **`MadCow.bat`**: arranca la app y abre el navegador (la primera vez instala lo necesario).
+  Si ya estaba en marcha, solo abre el navegador. Para cerrarla, cierra su ventana.
+  Admite las mismas opciones que `server.py`, p. ej. `MadCow.bat --lan --password clave`.
+- **`windows\arrancar-con-windows.bat`**: hace que MadCow arranque solo (minimizado y sin
+  abrir el navegador) cada vez que inicias sesión. Acepta las mismas opciones.
+  `windows\quitar-de-inicio.bat` lo deshace.
+
 ### Permisos de datos de mercado
 
 IBKR solo entrega históricos de las bolsas para las que tu cuenta tiene **suscripción
@@ -125,6 +134,15 @@ a menudo las peticiones automáticas (error 429).
     cambiar la ubicación con `python3 server.py --watchlist ~/favoritos.json`
     (por ejemplo, a una carpeta sincronizada en la nube). No se sube a git.
 
+- **Alertas** (pestaña Alertas, o la campana junto al nombre del valor):
+  - Precio que cruza un nivel, RSI que cruza un nivel, cierre fuera de una banda de Bollinger,
+    cruce alcista/bajista de medias y precio que cruza una media. Usan tus ajustes de indicadores.
+  - Saltan al **cruzar** la condición (no cada minuto mientras se cumple): de un solo uso o repetibles.
+  - El servidor las comprueba **cada minuto con velas diarias, aunque tengas el navegador cerrado**;
+    lo que salte mientras tanto lo verás al abrir la app (contador en la pestaña y en el título).
+  - Aviso dentro de la app, sonido y notificación del sistema (esta última solo abriendo la app
+    en el propio PC, `http://localhost`: los navegadores no la permiten en otras direcciones sin HTTPS).
+  - Los niveles de las alertas de precio se ven en el gráfico. Se guardan en `alerts.json`.
 - **Gráfico en vivo**: cada 30 s se actualizan la vela en curso, el volumen y los indicadores
   (punto verde junto al precio). Solo se piden a IBKR las velas recientes; si estás al final
   del gráfico, se desplaza solo al abrirse una vela nueva. Si se pierde la conexión el punto
@@ -177,6 +195,10 @@ automáticamente desde pytest); entre ellos, el RSI con el ejemplo clásico de W
 server.py              servidor HTTP, fuentes de datos y watchlist
 ibkr.py                fuente de datos Interactive Brokers (TWS / IB Gateway, solo lectura)
 histcache.py           caché de datos históricos en disco (SQLite)
+alerts.py              alertas: validación, evaluación y comprobación periódica
+indicators.py          indicadores en Python para las alertas (mismos cálculos que el gráfico)
+alerts.json            tus alertas y avisos (se crea solo; ignorado por git)
+MadCow.bat, windows/   lanzador y arranque con Windows
 cache.sqlite           la caché (se crea sola; ignorada por git)
 watchlist.json         tus favoritos (se crea al añadir el primero; ignorado por git)
 static/index.html      interfaz

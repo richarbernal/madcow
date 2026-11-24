@@ -8,3 +8,5 @@ watchlist.json.*
 # caché de datos históricos (la crea el servidor)
 cache.sqlite*
 .pytest_cache/
+alerts.json
+alerts.json.*

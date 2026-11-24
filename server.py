@@ -19,6 +19,7 @@ Uso:
     python3 server.py --ib-port 7497   # forzar puerto de TWS/IB Gateway (por defecto se detecta)
     python3 server.py --clear-cache    # borrar la caché de datos históricos
     python3 server.py --lan --password secreto   # accesible desde la red local, con contraseña
+    python3 server.py --open           # abrir el navegador al arrancar (lo usa MadCow.bat)
 
 Los datos históricos se guardan en cache.sqlite: la segunda vez solo se piden las
 velas nuevas y, si TWS está cerrado, se muestran los datos guardados.
@@ -39,6 +40,7 @@ import ssl
 import sys
 import threading
 import time
+import webbrowser
 from concurrent.futures import ThreadPoolExecutor
 import urllib.error
 import urllib.parse
@@ -47,6 +49,7 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import ibkr
+from alerts import AlertEngine
 from histcache import HistCache
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -66,6 +69,7 @@ SOURCE_NAME = "Yahoo Finance"
 SOURCE_KEY = "yahoo"
 BASE_DIR = Path(__file__).resolve().parent
 CACHE = HistCache(None)        # se sustituye en main() por la caché en disco
+ALERTS = None                  # AlertEngine (se crea en main())
 RANGE_DAYS = {"1mo": 31, "3mo": 92, "6mo": 183, "1y": 366, "2y": 731, "5y": 1827, "10y": 3653}
 YAHOO_SINCE_RANGES = ((5, "5d"), (31, "1mo"), (92, "3mo"), (183, "6mo"), (366, "1y"), (731, "2y"))
 
@@ -431,27 +435,90 @@ class Handler(SimpleHTTPRequestHandler):
             return self.api_quotes(params)
         if parsed.path == "/api/positions":
             return self.api_positions()
+        if parsed.path == "/api/alerts" and ALERTS is not None:
+            return self._send_json(ALERTS.snapshot())
         if parsed.path == "/api/watchlist":
             with _wl_lock:
                 return self._send_json({"symbols": read_watchlist()})
         return super().do_GET()
 
+    _NO_BODY = object()
+
+    def _read_json(self):
+        """Lee el cuerpo JSON. Si no es válido responde con el error y devuelve _NO_BODY.
+        Exigir JSON obliga al navegador a hacer preflight CORS, que este servidor no
+        acepta: así otra web no puede modificar tus datos."""
+        if not self.headers.get("Content-Type", "").startswith("application/json"):
+            self._send_json({"error": "Se esperaba JSON"}, 415)
+            return self._NO_BODY
+        length = int(self.headers.get("Content-Length") or 0)
+        if length > 50_000:
+            self._send_json({"error": "Demasiado grande"}, 413)
+            return self._NO_BODY
+        try:
+            return json.loads(self.rfile.read(length) or b"{}")
+        except json.JSONDecodeError:
+            self._send_json({"error": "JSON no válido"}, 400)
+            return self._NO_BODY
+
+    def do_POST(self):
+        if not self._allowed():
+            return
+        path = urllib.parse.urlparse(self.path).path
+        if path not in ("/api/alerts", "/api/alerts/read") or ALERTS is None:
+            return self._send_json({"error": "No encontrado"}, 404)
+        body = self._read_json()
+        if body is self._NO_BODY:
+            return
+        if path == "/api/alerts/read":
+            try:
+                ALERTS.mark_read(int(body.get("upto", 0)))
+            except (TypeError, ValueError, AttributeError):
+                return self._send_json({"error": "«upto» no válido"}, 400)
+            return self._send_json(ALERTS.snapshot())
+        try:
+            return self._send_json(ALERTS.create(body), 201)
+        except ValueError as e:
+            return self._send_json({"error": str(e)}, 400)
+
+    def do_DELETE(self):
+        if not self._allowed():
+            return
+        path = urllib.parse.urlparse(self.path).path
+        if ALERTS is None or not path.startswith("/api/alerts/"):
+            return self._send_json({"error": "No encontrado"}, 404)
+        target = path.rsplit("/", 1)[1]
+        if target == "events":
+            ALERTS.clear_events()
+            return self._send_json(ALERTS.snapshot())
+        try:
+            ALERTS.delete(target)
+        except KeyError:
+            return self._send_json({"error": "Alerta no encontrada"}, 404)
+        return self._send_json(ALERTS.snapshot())
+
     def do_PUT(self):
         if not self._allowed():
             return
-        if urllib.parse.urlparse(self.path).path != "/api/watchlist":
+        path = urllib.parse.urlparse(self.path).path
+        if path.startswith("/api/alerts/") and ALERTS is not None:
+            body = self._read_json()
+            if body is self._NO_BODY:
+                return
+            if not isinstance(body, dict):
+                return self._send_json({"error": "Se esperaba un objeto JSON"}, 400)
+            try:
+                alert = ALERTS.update(path.rsplit("/", 1)[1], body)
+            except KeyError:
+                return self._send_json({"error": "Alerta no encontrada"}, 404)
+            if body.get("enabled"):
+                ALERTS.check([alert["id"]])  # estado actual al reactivarla
+            return self._send_json(ALERTS.snapshot())
+        if path != "/api/watchlist":
             return self._send_json({"error": "No encontrado"}, 404)
-        # Exigir JSON obliga al navegador a hacer preflight CORS, que este servidor
-        # no acepta: así otra web no puede modificar tu watchlist.
-        if not self.headers.get("Content-Type", "").startswith("application/json"):
-            return self._send_json({"error": "Se esperaba JSON"}, 415)
-        length = int(self.headers.get("Content-Length") or 0)
-        if length > 50_000:
-            return self._send_json({"error": "Demasiado grande"}, 413)
-        try:
-            body = json.loads(self.rfile.read(length) or b"{}")
-        except json.JSONDecodeError:
-            return self._send_json({"error": "JSON no válido"}, 400)
+        body = self._read_json()
+        if body is self._NO_BODY:
+            return
         symbols = body.get("symbols") if isinstance(body, dict) else None
         if not isinstance(symbols, list) or len(symbols) > MAX_WATCHLIST:
             return self._send_json({"error": f"Se esperaba una lista de hasta {MAX_WATCHLIST} símbolos"}, 400)
@@ -600,6 +667,24 @@ def run_check() -> int:
     return 0 if ok else 1
 
 
+class AppServer(ThreadingHTTPServer):
+    daemon_threads = True
+    # En Windows SO_REUSEADDR deja que dos procesos escuchen en el mismo puerto: se desactiva
+    # para que un segundo arranque falle y se detecte que la app ya estaba en marcha.
+    allow_reuse_address = sys.platform != "win32"
+
+
+def _already_running(port: int) -> bool:
+    """¿Hay ya un MadCow escuchando en ese puerto?"""
+    try:
+        req = urllib.request.Request(f"http://127.0.0.1:{port}/api/watchlist", headers={"Host": "localhost"})
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))  # sin proxy
+        with opener.open(req, timeout=3) as r:
+            return "symbols" in json.loads(r.read())
+    except Exception:
+        return False
+
+
 def _report_connection():
     """Al arrancar, intenta conectar con IBKR en segundo plano e informa en la terminal."""
     try:
@@ -611,7 +696,7 @@ def _report_connection():
 
 
 def main():
-    global WATCHLIST_FILE, SOURCE, SOURCE_NAME, SOURCE_KEY, CACHE_TTL, CACHE, PASSWORD
+    global WATCHLIST_FILE, SOURCE, SOURCE_NAME, SOURCE_KEY, CACHE_TTL, CACHE, PASSWORD, ALERTS
     ap = argparse.ArgumentParser(description="MadCow Charts")
     ap.add_argument("--host", default="127.0.0.1",
                     help="dirección en la que escuchar (por defecto solo este PC)")
@@ -632,6 +717,10 @@ def main():
     ap.add_argument("--ib-client-id", type=int, default=117, help="clientId para la API de IBKR")
     ap.add_argument("--no-positions", action="store_true",
                     help="no leer las posiciones de la cuenta de IBKR")
+    ap.add_argument("--alerts", type=Path, default=BASE_DIR / "alerts.json",
+                    help="archivo donde guardar las alertas (por defecto alerts.json)")
+    ap.add_argument("--open", action="store_true", help="abrir la app en el navegador al arrancar")
+    ap.add_argument("--no-open", action="store_true", help="no abrir el navegador (anula --open)")
     ap.add_argument("--check", action="store_true", help="diagnosticar la conexión con la fuente de datos y salir")
     ap.add_argument("--cache", type=Path, default=BASE_DIR / "cache.sqlite",
                     help="archivo de la caché de datos históricos (por defecto cache.sqlite)")
@@ -657,7 +746,18 @@ def main():
     host = "0.0.0.0" if args.lan else args.host
     PASSWORD = args.password
     EXTRA_HOSTS.update(h.strip().lower() for h in args.allow_host if h.strip())
-    srv = ThreadingHTTPServer((host, args.port), Handler)
+    open_browser = args.open and not args.no_open
+    url = f"http://localhost:{args.port}"
+    try:
+        srv = AppServer((host, args.port), Handler)
+    except OSError:
+        if _already_running(args.port):
+            print(f"MadCow ya estaba en marcha en {url}")
+            if open_browser:
+                webbrowser.open(url)
+            sys.exit(0)
+        print(f"Error: el puerto {args.port} está ocupado por otro programa. Prueba con --port {args.port + 1}")
+        sys.exit(1)
     if host in ("127.0.0.1", "localhost", "::1"):
         print(f"MadCow Charts en http://localhost:{args.port}  (Ctrl+C para salir)")
     else:
@@ -678,8 +778,15 @@ def main():
         CACHE = HistCache(cache_path)
         n_series, n_bars = CACHE.stats()
         print(f"Caché de históricos: {cache_path} ({n_series} series, {n_bars} velas)")
+    ALERTS = AlertEngine(args.alerts.expanduser().resolve(),
+                         fetch=lambda symbol, rng: get_chart(symbol, rng, "1d", ttl=55))
+    n_alerts = sum(1 for a in ALERTS.snapshot()["alerts"] if a["enabled"])
+    print(f"Alertas: {ALERTS.path} ({n_alerts} activas, se comprueban cada minuto)")
+    ALERTS.start()
     if SOURCE is not None:
         threading.Thread(target=_report_connection, daemon=True).start()
+    if open_browser:
+        threading.Timer(0.5, webbrowser.open, args=(url,)).start()
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
