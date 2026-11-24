@@ -208,11 +208,13 @@ function renderPrice(keepRange = true) {
   if (S.chartType === "line") {
     mainSeries = priceChart.addAreaSeries({
       lineColor: COLOR_A, topColor: COLOR_A + "44", bottomColor: COLOR_A + "05", lineWidth: 2,
+      autoscaleInfoProvider: extAutoscale,
     });
     mainSeries.setData(bars.map((b) => ({ time: b.time, value: b.close })));
   } else {
     mainSeries = priceChart.addCandlestickSeries({
       upColor: up, downColor: down, borderUpColor: up, borderDownColor: down, wickUpColor: up, wickDownColor: down,
+      autoscaleInfoProvider: extAutoscale,
     });
     // Velas de pre/post-mercado atenuadas, como en TradingView
     mainSeries.setData(bars.map((b) => {
@@ -222,8 +224,10 @@ function renderPrice(keepRange = true) {
     }));
   }
   priceSeries.push(mainSeries);
-  costLine = null; // la línea anterior se fue con la serie
+  costLine = null; // las líneas anteriores se fueron con la serie
+  extLine = null;
   updatePositionOverlay();
+  updateExtLine();
   priceChart.priceScale("right").applyOptions({ scaleMargins: { top: 0.08, bottom: S.vol ? 0.2 : 0.06 } });
 
   renderRsi();
@@ -725,6 +729,38 @@ function renderWatchlist() {
 // ---------------------------------------------------------------------------
 const EXT_LABELS = { pre: ["☀", "Pre-mercado"], post: ["☾", "Post-mercado"], overnight: ["☾", "Nocturno"] };
 let extA = null;
+let extLine = null;   // línea de pre/post-mercado en el gráfico
+const EXT_COLORS = { pre: "#fb8c00", post: "#5c6bc0", overnight: "#5c6bc0" };
+
+const extVisible = () => !!(extA && S.ext && dataA && !dataA.demo && mainSeries);
+
+// Amplía la escala automática para que la línea de pre/post-mercado quede siempre a la vista
+function extAutoscale(original) {
+  const r = original();
+  if (!r || !extVisible()) return r;
+  return { ...r, priceRange: {
+    minValue: Math.min(r.priceRange.minValue, extA.price),
+    maxValue: Math.max(r.priceRange.maxValue, extA.price),
+  } };
+}
+
+// Marca en el gráfico el último precio de pre/post-mercado, como en TradingView
+function updateExtLine() {
+  if (!mainSeries) return;
+  if (extLine) { try { mainSeries.removePriceLine(extLine); } catch { /* serie ya rehecha */ } }
+  extLine = null;
+  const show = extVisible();
+  // Si el gráfico ya termina en una vela extendida (1 hora con pre/post), su etiqueta
+  // de último precio sería la misma: se oculta y queda la de pre/post-mercado.
+  const endsExt = show && !!dataA.bars.at(-1)?.ext;
+  mainSeries.applyOptions({ lastValueVisible: !endsExt, priceLineVisible: !endsExt });
+  if (!show) return;
+  const [, label] = EXT_LABELS[extA.session] || EXT_LABELS.post;
+  extLine = mainSeries.createPriceLine({
+    price: extA.price, color: EXT_COLORS[extA.session] || EXT_COLORS.post,
+    lineWidth: 1, lineStyle: LWC.LineStyle.Dashed, axisLabelVisible: true, title: label,
+  });
+}
 
 function fmtExtTime(ts) {
   const d = new Date(ts * 1000);
@@ -734,6 +770,7 @@ function fmtExtTime(ts) {
 
 function renderExt() {
   const el = $("qExt");
+  updateExtLine();
   if (!extA || !S.ext || !dataA) { el.hidden = true; return; }
   const [icon, label] = EXT_LABELS[extA.session] || EXT_LABELS.post;
   el.hidden = false;
