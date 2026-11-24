@@ -150,6 +150,11 @@ def us_session(ts: int) -> str:
     return "overnight"
 
 
+def now() -> float:
+    """Hora actual (los tests la sustituyen para simular cualquier momento)."""
+    return time.time()
+
+
 def is_us_stock(contract) -> bool:
     return contract.secType == "STK" and (contract.primaryExchange or contract.exchange) in US_EXCHANGES
 
@@ -311,12 +316,20 @@ class IBKRSource:
         }
 
     async def _extended(self, symbol: str) -> dict | None:
-        """Último precio de pre/post-mercado (solo acciones de EE. UU.), o None si no aplica."""
+        """Último precio de pre/post-mercado (solo acciones de EE. UU.), o None si no aplica.
+
+        La sesión se decide con el reloj: durante la sesión regular no hay precio fuera de
+        horario que mostrar, aunque la última vela recibida sea de antes de la apertura
+        (datos con 15 min de retraso sin suscripción en tiempo real, valores poco negociados…).
+        Fuera de horario, la etiqueta dice de cuándo es el último precio (p. ej. el post-mercado
+        de ayer si aún no se ha negociado en el pre-mercado de hoy)."""
         async with self._lock:
             ib = await self._connect()
             contract, _ = await self._resolve(ib, symbol)
         if not is_us_stock(contract):
             return None
+        if us_session(int(now())) == "regular":
+            return {"session": "regular", "price": None, "time": None}
         _, _, bars = await self._bars(symbol, "3 D", "5 mins", rth=False)
         if not bars:
             return None

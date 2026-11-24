@@ -31,6 +31,7 @@ def tws(monkeypatch):
     monkeypatch.setattr(fake_tws, "STATE", state)
     monkeypatch.setattr(ib_async, "IB", fake_tws.FakeIB)
     monkeypatch.setattr(ibkr, "RETRY_AFTER", 0)  # reintentar la conexión sin esperar
+    monkeypatch.setattr(ibkr, "now", lambda: state.now.timestamp())  # el reloj del simulador
     return state
 
 

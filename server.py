@@ -290,7 +290,8 @@ def get_extended(symbol: str):
     """Precio de pre/post-mercado (o None). Nunca lanza: es información accesoria."""
     if SOURCE is None:
         return None
-    key = (symbol, "ext")
+    # La sesión forma parte de la clave: al abrir o cerrar el mercado se consulta de nuevo al momento
+    key = (symbol, "ext", ibkr.us_session(int(ibkr.now())))
     hit = _cache.get(key)
     if hit and time.time() - hit[0] < 60:
         return hit[1]

@@ -224,6 +224,23 @@ def test_extended_price(source, tws, now, session):
     assert source.extended("SAN.MC") is None and source.extended("^IBEX") is None
 
 
+@pytest.mark.parametrize("data_until, clock, expected", [
+    # Datos con 15 min de retraso: a las 9:40 la última vela aún es de las 9:20 (pre-mercado)
+    (dt.datetime(2026, 11, 20, 14, 20, tzinfo=UTC), dt.datetime(2026, 11, 20, 14, 40, tzinfo=UTC), "regular"),
+    # Pre-mercado sin operaciones todavía: el último precio es el post-mercado de ayer
+    (dt.datetime(2026, 11, 19, 23, 30, tzinfo=UTC), dt.datetime(2026, 11, 20, 9, 30, tzinfo=UTC), "post"),
+    # Datos con retraso justo tras el cierre: la última vela aún es de la sesión regular
+    (dt.datetime(2026, 11, 20, 20, 50, tzinfo=UTC), dt.datetime(2026, 11, 20, 21, 5, tzinfo=UTC), "regular"),
+])
+def test_extended_session_follows_the_clock(source, tws, monkeypatch, data_until, clock, expected):
+    tws.now = data_until                                     # hasta dónde llegan las velas
+    monkeypatch.setattr(ibkr, "now", lambda: clock.timestamp())
+    n = len(tws.history_requests)
+    assert source.extended("AAPL")["session"] == expected
+    if ibkr.us_session(int(clock.timestamp())) == "regular":
+        assert len(tws.history_requests) == n               # en sesión regular ni se pide a IBKR
+
+
 def test_positions(source, tws):
     for sym in ("AAPL", "MSFT", "SAN.MC"):
         source.chart(sym, "1mo", "1d")
