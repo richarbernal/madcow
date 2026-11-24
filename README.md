@@ -154,6 +154,23 @@ a menudo las peticiones automáticas (error 429).
 
 Símbolos de Yahoo: `AAPL`, `MSFT`, `SAN.MC` (Mercado Continuo), `ITX.MC`, `^IBEX`, `^GSPC`, `BTC-USD`…
 
+## Tests
+
+Los tests no necesitan TWS ni conexión: usan un **TWS simulado** (`tests/fake_tws.py`) que
+imita la librería de la API, incluidos sus errores reales (puerto cerrado, clientId en uso,
+símbolo desconocido, falta de permisos de datos).
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest
+```
+
+Cubren la traducción de símbolos, las sesiones de EE. UU. con el horario de verano, la
+conexión con IBKR, la caché (descarga incremental, splits, TWS cerrado), pre/post-mercado,
+la cartera, los endpoints HTTP y la seguridad (cabecera Host, contraseña, privacidad de la
+cartera). Si tienes **Node.js**, también se prueban los indicadores (`npm test`, o
+automáticamente desde pytest); entre ellos, el RSI con el ejemplo clásico de Wilder.
+
 ## Estructura
 
 ```
@@ -166,6 +183,7 @@ static/index.html      interfaz
 static/app.js          lógica de gráficos, comparación y controles
 static/indicators.js   SMA, EMA, Bollinger, RSI y estadísticas
 static/vendor/         TradingView Lightweight Charts 4.1.3 (Apache 2.0)
+tests/                 tests (pytest) y TWS simulado; tests/js/ para los indicadores (Node)
 ```
 
 > Datos con posible retraso. Herramienta de análisis, no asesoramiento financiero.

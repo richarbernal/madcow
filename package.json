@@ -1,0 +1,9 @@
+{
+  "name": "madcow-charts",
+  "private": true,
+  "type": "module",
+  "description": "Tests del frontend (indicadores). La app no necesita Node para funcionar.",
+  "scripts": {
+    "test": "node --test tests/js/indicators.test.mjs"
+  }
+}

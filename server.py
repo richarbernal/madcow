@@ -384,13 +384,17 @@ class Handler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _is_local(self) -> bool:
+        """¿La petición viene de este mismo PC?"""
+        return ipaddress.ip_address(self.client_address[0]).is_loopback
+
     def _allowed(self) -> bool:
         """Comprueba la cabecera Host y, si hay contraseña, la autenticación. Si no pasa, responde."""
         if not host_allowed(self.headers.get("Host", "")):
             self._send_json({"error": "Host no permitido. Usa la IP o el nombre de este PC "
                                       "(o añádelo con --allow-host)."}, 403)
             return False
-        if not PASSWORD or ipaddress.ip_address(self.client_address[0]).is_loopback:
+        if not PASSWORD or self._is_local():
             return True
         auth = self.headers.get("Authorization", "")
         if auth.startswith("Basic "):
@@ -495,7 +499,7 @@ class Handler(SimpleHTTPRequestHandler):
         if SOURCE is None:
             return self._send_json({"available": False,
                                     "reason": "Las posiciones solo están disponibles con Interactive Brokers."})
-        if not PASSWORD and not ipaddress.ip_address(self.client_address[0]).is_loopback:
+        if not PASSWORD and not self._is_local():
             return self._send_json({"available": False, "reason":
                                     "Por seguridad, tus posiciones solo se muestran en el PC donde corre la app. "
                                     "Para verlas desde otros dispositivos, arráncala con --password."}, 403)
